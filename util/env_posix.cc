@@ -114,22 +114,74 @@ class Limiter {
 // by the SequentialFile API.
 class PosixSequentialFile final : public SequentialFile {
  public:
-  PosixSequentialFile(std::string filename, int zone_number)
-      : zone_number_(zone_number), filename_(filename) {}
-  ~PosixSequentialFile() override { close(zone_number); }
+  PosixSequentialFile(std::string filename, int zone_number, zbc_device *dev, std::string path)
+      : zone_number_(zone_number), 
+        filename_(filename),
+        dev_(dev),
+        path_(path) {}
+
+  ~PosixSequentialFile() override {
+    struct zbc_zone *zones = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+    unsigned int nr_zones;
+    unsigned long long start_sector = 0;
+
+    zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
+
+    target_zone = &zones[zone_number_];
+
+    start_sector = zbc_zone_start(target_zone);
+
+    zbc_zone_operation(dev_, start_sector, ZBC_OP_CLOSE_ZONE, 0);
+  }
 
   Status Read(size_t n, Slice* result, char* scratch) override {
-    Status status;
-    while (true) {
-      ::ssize_t read_size = ::read(zone_number_, scratch, n); //read하는 부분 -> libzbc
-      if (read_size < 0) {  // Read error. 
-        if (errno == EINTR) {
-          continue;  // Retry
-        }
-        status = PosixError(filename_, errno);
-        break;
+    // Variables for zbc zones
+    ssize_t sector_count;
+    struct zbc_zone *zones = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+    unsigned int nr_zones;
+    long long zone_ofst = 0;
+    long long sector_ofst;
+
+    // ZNS device open
+    ssize_t ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
+    if (ret != 0) {
+      if (ret == -ENODEV) {
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
+      } else {  
+        fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
       }
-      *result = Slice(scratch, read_size);
+      return PosixError(path_, errno);
+    }
+
+    // Get all device zones
+    ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev_);
+      free(zones);
+      return PosixError(path_, errno);
+    }
+
+    // Set target zone and check target zone is Sequential
+    target_zone = &zones[zone_num_];
+    if (!zbc_zone_sequential(target_zone)) {
+      errno = EINVAL;
+      perror("Invalid or Cannot find sequential zone\n");
+      return PosixError(path_, errno);
+    }
+
+    while (true) {
+      sector_count = size >> 9;
+      sector_ofst = zbc_zone_start(target_zone) + zone_ofst;
+
+      ret = zbc_pread(dev_, scratch, sector_count, sector_ofst);
+      if (ret < 0) {  // Read error. 
+        if (errno == EINTR) continue;  // Retry
+        return PosixError(filename_, errno);
+      }
+      *result = Slice(scratch, ret);
       break;
     }
     return status;
@@ -145,6 +197,8 @@ class PosixSequentialFile final : public SequentialFile {
  private:
   const int zone_number_;
   const std::string filename_;
+  struct zbc_device *dev_;
+  std::string path_;
 };
 
 // Implements random read access in a file using pread().
@@ -207,6 +261,9 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   const int zone_number_;                 // -1 if has_permanent_fd_ is false.
   Limiter* const fd_limiter_;
   const std::string filename_;
+
+  struct zbc_device *dev_;
+  std::string path_;
 };
 
 // Implements random read access in a file using mmap().
@@ -255,14 +312,13 @@ class PosixMmapReadableFile final : public RandomAccessFile {
 
 class PosixWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(std::string filename, int zone_number, zbc_device *dev, std::string path)
+  PosixWritableFile(std::string filename, int zone_number, zbc_device *dev)
       : pos_(0),
         zone_number_(zone_number),
         is_manifest_(IsManifest(filename)),
         filename_(std::move(filename)),
         dirname_(Dirname(filename_)),
-        dev_(dev),
-        path_(path) {}
+        dev_(dev) {}
 
   ~PosixWritableFile() override {
     if (zone_number_ >= 0) {
@@ -348,17 +404,6 @@ class PosixWritableFile final : public WritableFile {
     long long zone_ofst = 0;
     long long sector_ofst;
 
-    // ZNS device open
-    ssize_t ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
-    if (ret != 0) {
-      if (ret == -ENODEV) {
-        fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
-      } else {  
-        fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
-      }
-      return PosixError(path_, errno);
-    }
-
     // Get all device zones
     ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
     if (ret != 0) {
@@ -392,7 +437,7 @@ class PosixWritableFile final : public WritableFile {
       data += ret;
       size -= ret;
     }
-    
+
     return Status::OK();
   }
 
@@ -490,7 +535,6 @@ class PosixWritableFile final : public WritableFile {
 
   // zbc device
   struct zbc_device *dev_;
-  std::string path_;
   int zone_number_;
 };
 
