@@ -389,7 +389,30 @@ class PosixWritableFile final : public WritableFile {
 
   Status Close() override {
     Status status = FlushBuffer();
-    ssize_t ret = zbc_zone_operation(dev_, sector_ofst, ZBC_OP_CLOSE_ZONE, 0);
+
+    struct zbc_zone *target_zone = nullptr;
+    struct zbc_zone *zones = nullptr;
+
+    unsigned long nr_zones;
+
+    // Get all device zones
+    ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev_);
+      free(zones);
+      return PosixError(filename_, errno);
+    }
+
+    // Set target zone and check target zone is Sequential
+    target_zone = &zones[zone_number_];
+    if (!zbc_zone_sequential(target_zone)) {
+      errno = EINVAL;
+      perror("Invalid or Cannot find sequential zone\n");
+      return PosixError(filename_, errno);
+    }
+
+    ssize_t ret = zbc_zone_operation(dev_, zbc_zone_start(target_zone), ZBC_OP_CLOSE_ZONE, 0);
     if (ret < 0 && status.ok()) {
       status = PosixError(filename_, errno);
     }
@@ -480,6 +503,9 @@ class PosixWritableFile final : public WritableFile {
 
     struct zbc_zone *target_zone = nullptr;
     struct zbc_zone *zones = nullptr;
+
+    unsigned long nr_zones;
+
     if (!is_manifest_) {
       return status;
     }
@@ -656,8 +682,43 @@ class PosixEnv : public Env {
 
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
+    std::string path = "/dev/sda";
+    ssize_t ret;
+
+    struct zbc_device *dev = nullptr;
+
+    struct zbc_zone *zone_list = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+
+    unsigned int nr_zones;
+
+    int zone_number;
+
+    // Open ZNS Device
+    ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError(path, errno);
+    }
+
+    // Get Zone Lists
+    ret = zbc_list_zones(dev, 0, ZBC_RO_ALL, &zone_list, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev);
+      free(zone_list);
+      return PosixError(path, errno);
+    }
+
+    /* filename : zone mapping and get target zone here */
+    zone_number = 128;
+    target_zone = &zone_list[zone_number];
+
     
-    // Zone Mapping 
+
     int zone_number = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
     if (zone_number < 0) {
       *result = nullptr;
