@@ -26,6 +26,8 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <map>
+#include <string>
 
 #include "leveldb/env.h"
 #include "leveldb/slice.h"
@@ -38,6 +40,9 @@
 namespace leveldb {
 
 namespace {
+
+//Zone Mapping Table
+map<std::string, int> zone_map;
 
 // Set by EnvPosixTestHelper::SetReadOnlyMMapLimit() and MaxOpenFiles().
 int g_open_read_only_file_limit = -1;
@@ -107,15 +112,15 @@ class Limiter {
 // by the SequentialFile API.
 class PosixSequentialFile final : public SequentialFile {
  public:
-  PosixSequentialFile(std::string filename, int fd)
-      : fd_(fd), filename_(filename) {}
-  ~PosixSequentialFile() override { close(fd_); }
+  PosixSequentialFile(std::string filename, int zone_number)
+      : zone_number_(zone_number), filename_(filename) {}
+  ~PosixSequentialFile() override { close(zone_number); }
 
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
     while (true) {
-      ::ssize_t read_size = ::read(fd_, scratch, n);
-      if (read_size < 0) {  // Read error.
+      ::ssize_t read_size = ::read(zone_number_, scratch, n); //read하는 부분 -> libzbc
+      if (read_size < 0) {  // Read error. 
         if (errno == EINTR) {
           continue;  // Retry
         }
@@ -136,7 +141,7 @@ class PosixSequentialFile final : public SequentialFile {
   }
 
  private:
-  const int fd_;
+  const int zone_number_;
   const std::string filename_;
 };
 
@@ -151,34 +156,34 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   // instance, and will be used to determine if .
   PosixRandomAccessFile(std::string filename, int fd, Limiter* fd_limiter)
       : has_permanent_fd_(fd_limiter->Acquire()),
-        fd_(has_permanent_fd_ ? fd : -1),
+        zone_number_(has_permanent_fd_ ? fd : -1),
         fd_limiter_(fd_limiter),
         filename_(std::move(filename)) {
     if (!has_permanent_fd_) {
-      assert(fd_ == -1);
-      ::close(fd);  // The file will be opened on every read.
+      assert(zone_number_ == -1);
+      ::close(zone_number_);  //libzbc close
     }
   }
 
   ~PosixRandomAccessFile() override {
     if (has_permanent_fd_) {
-      assert(fd_ != -1);
-      ::close(fd_);
+      assert(zone_number_ != -1);
+      ::close(zone_number_); //libzbc close
       fd_limiter_->Release();
     }
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
-    int fd = fd_;
+    int zone_number = zone_number_;
     if (!has_permanent_fd_) {
-      fd = ::open(filename_.c_str(), O_RDONLY | kOpenBaseFlags);
-      if (fd < 0) {
+      zone_number = ::open(filename_.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc
+      if (zone_number < 0) {
         return PosixError(filename_, errno);
       }
     }
 
-    assert(fd != -1);
+    assert(zone_number != -1);
 
     Status status;
     ssize_t read_size = ::pread(fd, scratch, n, static_cast<off_t>(offset));
@@ -189,15 +194,15 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
     if (!has_permanent_fd_) {
       // Close the temporary file descriptor opened earlier.
-      assert(fd != fd_);
-      ::close(fd);
+      assert(zone_number != zone_number_);
+      ::close(zone_number); //libzbc close
     }
     return status;
   }
 
  private:
   const bool has_permanent_fd_;  // If false, the file is opened on every read.
-  const int fd_;                 // -1 if has_permanent_fd_ is false.
+  const int zone_number_;                 // -1 if has_permanent_fd_ is false.
   Limiter* const fd_limiter_;
   const std::string filename_;
 };
@@ -248,15 +253,15 @@ class PosixMmapReadableFile final : public RandomAccessFile {
 
 class PosixWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(std::string filename, int fd)
+  PosixWritableFile(std::string filename, int zone_number)
       : pos_(0),
-        fd_(fd),
+        zone_number_(zone_number),
         is_manifest_(IsManifest(filename)),
         filename_(std::move(filename)),
         dirname_(Dirname(filename_)) {}
 
   ~PosixWritableFile() override {
-    if (fd_ >= 0) {
+    if (zone_number_ >= 0) {
       // Ignoring any potential errors
       Close();
     }
@@ -297,7 +302,7 @@ class PosixWritableFile final : public WritableFile {
     if (close_result < 0 && status.ok()) {
       status = PosixError(filename_, errno);
     }
-    fd_ = -1;
+    zone_number_ = -1;
     return status;
   }
 
@@ -319,7 +324,8 @@ class PosixWritableFile final : public WritableFile {
       return status;
     }
 
-    return SyncFd(fd_, filename_);
+    //return SyncFd(fd_, filename_);
+    return Status::OK();
   }
 
  private:
@@ -331,7 +337,7 @@ class PosixWritableFile final : public WritableFile {
 
   Status WriteUnbuffered(const char* data, size_t size) {
     while (size > 0) {
-      ssize_t write_result = ::write(fd_, data, size);
+      ssize_t write_result = ::write(zone_number_, data, size); //libzbc write
       if (write_result < 0) {
         if (errno == EINTR) {
           continue;  // Retry
@@ -350,12 +356,13 @@ class PosixWritableFile final : public WritableFile {
       return status;
     }
 
-    int fd = ::open(dirname_.c_str(), O_RDONLY | kOpenBaseFlags);
-    if (fd < 0) {
+    int zone_number = ::open(dirname_.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc zone open
+    if (zone_number < 0) {
       status = PosixError(dirname_, errno);
     } else {
-      status = SyncFd(fd, dirname_);
-      ::close(fd);
+      //status = SyncFd(zone_number, dirname_);
+      status = Status::OK();
+      ::close(fd); //libzbc
     }
     return status;
   }
@@ -429,14 +436,14 @@ class PosixWritableFile final : public WritableFile {
   // buf_[0, pos_ - 1] contains data to be written to fd_.
   char buf_[kWritableFileBufferSize];
   size_t pos_;
-  int fd_;
+  int zone_number_;
 
   const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
   const std::string dirname_;  // The directory of filename_.
 };
 
-int LockOrUnlock(int fd, bool lock) {
+int LockOrUnlock(int zoneNumber, bool lock) {
   errno = 0;
   struct ::flock file_lock_info;
   std::memset(&file_lock_info, 0, sizeof(file_lock_info));
@@ -444,20 +451,21 @@ int LockOrUnlock(int fd, bool lock) {
   file_lock_info.l_whence = SEEK_SET;
   file_lock_info.l_start = 0;
   file_lock_info.l_len = 0;  // Lock/unlock entire file.
-  return ::fcntl(fd, F_SETLK, &file_lock_info);
+  return ::fcntl(zoneNumber, F_SETLK, &file_lock_info);
+  //여기 return 대신 libzbc close 사용
 }
 
 // Instances are thread-safe because they are immutable.
 class PosixFileLock : public FileLock {
  public:
-  PosixFileLock(int fd, std::string filename)
-      : fd_(fd), filename_(std::move(filename)) {}
+  PosixFileLock(int zone_number, std::string filename)
+      : zone_number_(zone_number), filename_(std::move(filename)) {}
 
-  int fd() const { return fd_; }
+  int zone_number() const { return zone_number_; }
   const std::string& filename() const { return filename_; }
 
  private:
-  const int fd_;
+  const int zone_number_;
   const std::string filename_;
 };
 
@@ -499,43 +507,43 @@ class PosixEnv : public Env {
 
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
-    int fd = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
-    if (fd < 0) {
+    int zone_number = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc
+    if (zone_number < 0) {
       *result = nullptr;
       return PosixError(filename, errno);
     }
 
-    *result = new PosixSequentialFile(filename, fd);
+    *result = new PosixSequentialFile(filename, zone_number);
     return Status::OK();
   }
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
     *result = nullptr;
-    int fd = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
-    if (fd < 0) {
+    int zone_number = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc
+    if (zone_number < 0) {
       return PosixError(filename, errno);
     }
 
     if (!mmap_limiter_.Acquire()) {
-      *result = new PosixRandomAccessFile(filename, fd, &fd_limiter_);
+      *result = new PosixRandomAccessFile(filename, zone_number, &fd_limiter_);
       return Status::OK();
     }
 
     uint64_t file_size;
     Status status = GetFileSize(filename, &file_size);
     if (status.ok()) {
-      void* mmap_base =
-          ::mmap(/*addr=*/nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
-      if (mmap_base != MAP_FAILED) {
-        *result = new PosixMmapReadableFile(filename,
-                                            reinterpret_cast<char*>(mmap_base),
-                                            file_size, &mmap_limiter_);
-      } else {
-        status = PosixError(filename, errno);
-      }
+      // void* mmap_base =
+      //     ::mmap(/*addr=*/nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
+      //if (mmap_base != MAP_FAILED) {
+        // *result = new PosixMmapReadableFile(filename,
+        //                                     reinterpret_cast<char*>(mmap_base),
+        //                                     file_size, &mmap_limiter_);
+      // } else {
+      //   status = PosixError(filename, errno);
+      // }
     }
-    ::close(fd);
+    ::close(zone_number); //libzbc
     if (!status.ok()) {
       mmap_limiter_.Release();
     }
@@ -544,27 +552,27 @@ class PosixEnv : public Env {
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
-    int fd = ::open(filename.c_str(),
-                    O_TRUNC | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644);
-    if (fd < 0) {
+    int zone_number = ::open(filename.c_str(),
+                    O_TRUNC | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644); //libzbc
+    if (zone_number < 0) {
       *result = nullptr;
       return PosixError(filename, errno);
     }
 
-    *result = new PosixWritableFile(filename, fd);
+    *result = new PosixWritableFile(filename, zone_number);
     return Status::OK();
   }
 
   Status NewAppendableFile(const std::string& filename,
                            WritableFile** result) override {
-    int fd = ::open(filename.c_str(),
-                    O_APPEND | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644);
-    if (fd < 0) {
+    int zone_number = ::open(filename.c_str(),
+                    O_APPEND | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644); //libzbc
+    if (zone_number < 0) {
       *result = nullptr;
       return PosixError(filename, errno);
     }
 
-    *result = new PosixWritableFile(filename, fd);
+    *result = new PosixWritableFile(filename, zone_number);
     return Status::OK();
   }
 
@@ -588,14 +596,14 @@ class PosixEnv : public Env {
   }
 
   Status RemoveFile(const std::string& filename) override {
-    if (::unlink(filename.c_str()) != 0) {
+    if (::unlink(filename.c_str()) != 0) { //libzbc remove
       return PosixError(filename, errno);
     }
     return Status::OK();
   }
 
   Status CreateDir(const std::string& dirname) override {
-    if (::mkdir(dirname.c_str(), 0755) != 0) {
+    if (::mkdir(dirname.c_str(), 0755) != 0) { //libzbc
       return PosixError(dirname, errno);
     }
     return Status::OK();
@@ -628,34 +636,34 @@ class PosixEnv : public Env {
   Status LockFile(const std::string& filename, FileLock** lock) override {
     *lock = nullptr;
 
-    int fd = ::open(filename.c_str(), O_RDWR | O_CREAT | kOpenBaseFlags, 0644);
-    if (fd < 0) {
+    int zone_number = ::open(filename.c_str(), O_RDWR | O_CREAT | kOpenBaseFlags, 0644);  //libzbc
+    if (zone_number < 0) {
       return PosixError(filename, errno);
     }
 
     if (!locks_.Insert(filename)) {
-      ::close(fd);
+      ::close(zone_number);
       return Status::IOError("lock " + filename, "already held by process");
     }
 
-    if (LockOrUnlock(fd, true) == -1) {
+    if (LockOrUnlock(zone_number, true) == -1) {
       int lock_errno = errno;
-      ::close(fd);
+      ::close(zone_number); //libzbc
       locks_.Remove(filename);
       return PosixError("lock " + filename, lock_errno);
     }
 
-    *lock = new PosixFileLock(fd, filename);
+    *lock = new PosixFileLock(zone_number, filename);
     return Status::OK();
   }
 
   Status UnlockFile(FileLock* lock) override {
     PosixFileLock* posix_file_lock = static_cast<PosixFileLock*>(lock);
-    if (LockOrUnlock(posix_file_lock->fd(), false) == -1) {
+    if (LockOrUnlock(posix_file_lock->zone_number(), false) == -1) {
       return PosixError("unlock " + posix_file_lock->filename(), errno);
     }
     locks_.Remove(posix_file_lock->filename());
-    ::close(posix_file_lock->fd());
+    ::close(posix_file_lock->zone_number());
     delete posix_file_lock;
     return Status::OK();
   }
@@ -676,7 +684,7 @@ class PosixEnv : public Env {
     } else {
       char buf[100];
       std::snprintf(buf, sizeof(buf), "/tmp/leveldbtest-%d",
-                    static_cast<int>(::geteuid()));
+                    static_cast<int>(::geteuid())); //libzbc
       *result = buf;
     }
 
@@ -687,22 +695,22 @@ class PosixEnv : public Env {
   }
 
   Status NewLogger(const std::string& filename, Logger** result) override {
-    int fd = ::open(filename.c_str(),
-                    O_APPEND | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644);
-    if (fd < 0) {
+    int zone_number = ::open(filename.c_str(),
+                    O_APPEND | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644); //libzbc
+    if (zone_number < 0) {
       *result = nullptr;
       return PosixError(filename, errno);
     }
 
-    std::FILE* fp = ::fdopen(fd, "w");
-    if (fp == nullptr) {
-      ::close(fd);
-      *result = nullptr;
-      return PosixError(filename, errno);
-    } else {
-      *result = new PosixLogger(fp);
-      return Status::OK();
-    }
+    // std::FILE* fp = ::fdopen(fd, "w");
+    // if (fp == nullptr) {
+    //   ::close(fd);
+    //   *result = nullptr;
+    //   return PosixError(filename, errno);
+    // } else {
+    //   *result = new PosixLogger(fp);
+    //   return Status::OK();
+    // }
   }
 
   uint64_t NowMicros() override {
