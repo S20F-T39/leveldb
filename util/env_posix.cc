@@ -44,7 +44,7 @@ namespace leveldb {
 namespace {
 
 //Zone Mapping Table
-map<std::string, int> zone_map;
+std::map<std::string, int> zone_map;
 
 // Set by EnvPosixTestHelper::SetReadOnlyMMapLimit() and MaxOpenFiles().
 int g_open_read_only_file_limit = -1;
@@ -165,7 +165,7 @@ class PosixSequentialFile final : public SequentialFile {
     }
 
     // Set target zone and check target zone is Sequential
-    target_zone = &zones[zone_num_];
+    target_zone = &zones[zone_number_];
     if (!zbc_zone_sequential(target_zone)) {
       errno = EINVAL;
       perror("Invalid or Cannot find sequential zone\n");
@@ -173,7 +173,7 @@ class PosixSequentialFile final : public SequentialFile {
     }
 
     while (true) {
-      sector_count = size >> 9;
+      sector_count = n >> 9;
       sector_ofst = zbc_zone_start(target_zone) + zone_ofst;
 
       ret = zbc_pread(dev_, scratch, sector_count, sector_ofst);
@@ -184,13 +184,13 @@ class PosixSequentialFile final : public SequentialFile {
       *result = Slice(scratch, ret);
       break;
     }
-    return status;
+    return Status::OK();
   }
 
   Status Skip(uint64_t n) override {
-    if (::lseek(fd_, n, SEEK_CUR) == static_cast<off_t>(-1)) {
-      return PosixError(filename_, errno);
-    }
+    // if (::lseek(fd_, n, SEEK_CUR) == static_cast<off_t>(-1)) {
+    //   return PosixError(filename_, errno);
+    // }
     return Status::OK();
   }
 
@@ -217,14 +217,14 @@ class PosixRandomAccessFile final : public RandomAccessFile {
         filename_(std::move(filename)) {
     if (!has_permanent_fd_) {
       assert(zone_number_ == -1);
-      ::close(zone_number_);  //libzbc close
+      zbc_close(dev_);
     }
   }
 
   ~PosixRandomAccessFile() override {
     if (has_permanent_fd_) {
       assert(zone_number_ != -1);
-      ::close(zone_number_); //libzbc close
+      zbc_close(dev_);
       fd_limiter_->Release();
     }
   }
@@ -232,28 +232,70 @@ class PosixRandomAccessFile final : public RandomAccessFile {
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
     int zone_number = zone_number_;
+    ssize_t ret;
+
+    // Variables for zbc zones
+    ssize_t sector_count;
+    struct zbc_zone *zones = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+    unsigned int nr_zones;
+    long long zone_ofst = 0;
+    long long sector_ofst;
+
     if (!has_permanent_fd_) {
-      zone_number = ::open(filename_.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc
-      if (zone_number < 0) {
+      // ZNS device open
+      ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
+      if (ret != 0) {
+        if (ret == -ENODEV) {
+          fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
+        } else {  
+          fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
+        }
+        return PosixError(path_, errno);
+      }
+
+      // Get all device zones
+      ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
+      if (ret != 0) {
+        fprintf(stderr, "zbc_list_zones failed\n");
+        zbc_close(dev_);
+        free(zones);
+        return PosixError(path_, errno);
+      }
+
+      // Set target zone and check target zone is Sequential
+      target_zone = &zones[zone_number_];
+      if (!zbc_zone_sequential(target_zone)) {
+        errno = EINVAL;
+        perror("Invalid or Cannot find sequential zone\n");
+        return PosixError(path_, errno);
+      }
+
+      sector_count = n >> 9;
+      sector_ofst = zbc_zone_start(target_zone) + zone_ofst;
+
+      ret = zbc_zone_operation(dev_, sector_ofst, ZBC_OP_OPEN_ZONE, 0);
+
+      if (ret < 0) {
         return PosixError(filename_, errno);
       }
     }
 
     assert(zone_number != -1);
 
-    Status status;
-    ssize_t read_size = ::pread(fd, scratch, n, static_cast<off_t>(offset));
-    *result = Slice(scratch, (read_size < 0) ? 0 : read_size);
-    if (read_size < 0) {
+    zbc_pread(dev_, scratch, sector_count, sector_ofst);
+    ret = zbc_pread(dev_, scratch, n static_cast<off_t>(offset));
+    *result = Slice(scratch, (ret < 0) ? 0 : ret);
+    if (ret < 0) {
       // An error: return a non-ok status.
-      status = PosixError(filename_, errno);
+      return PosixError(filename_, errno);
     }
     if (!has_permanent_fd_) {
       // Close the temporary file descriptor opened earlier.
       assert(zone_number != zone_number_);
-      ::close(zone_number); //libzbc close
+      zbc_zone_operation(dev_, zbc_zone_start(target_zone), ZBC_OP_CLOSE_ZONE, 0);
     }
-    return status;
+    return Status::OK();
   }
 
  private:
@@ -396,7 +438,7 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status WriteUnbuffered(const char* data, size_t size) {
-    // Variables for libzbc zones
+    // Variables for zbc zones
     ssize_t sector_count;
     struct zbc_zone *zones = nullptr;
     struct zbc_zone *target_zone = nullptr;
@@ -442,18 +484,56 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status SyncDirIfManifest() {
+    ssize_t ret, sector_count;
+    long long sector_ofst;
+
     Status status;
+
+    struct zbc_zone *target_zone = nullptr;
+    struct zbc_zone *zones = nullptr;
     if (!is_manifest_) {
       return status;
     }
 
-    int zone_number = ::open(dirname_.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc zone open
-    if (zone_number < 0) {
+    // ZNS device open
+    ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
+    if (ret != 0) {
+      if (ret == -ENODEV) {
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
+      } else {  
+        fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
+      }
+      return PosixError(path_, errno);
+    }
+
+    // Get all device zones
+    ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev_);
+      free(zones);
+      return PosixError(path_, errno);
+    }
+
+    // Set target zone and check target zone is Sequential
+    target_zone = &zones[zone_number_];
+    if (!zbc_zone_sequential(target_zone)) {
+      errno = EINVAL;
+      perror("Invalid or Cannot find sequential zone\n");
+      return PosixError(path_, errno);
+    }
+
+    sector_count = n >> 9;
+    sector_ofst = zbc_zone_start(target_zone);
+
+    ret = zbc_zone_operation(dev_, sector_ofst, ZBC_OP_OPEN_ZONE, 0);
+
+    if (ret < 0) {
       status = PosixError(dirname_, errno);
     } else {
       //status = SyncFd(zone_number, dirname_);
       status = Status::OK();
-      ::close(fd); //libzbc
+      zbc_zone_operation(dev_, sector_ofst, ZBC_OP_CLOSE_ZONE, 0);
     }
     return status;
   }
