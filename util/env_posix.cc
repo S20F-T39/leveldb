@@ -341,9 +341,12 @@ class PosixWritableFile final : public WritableFile {
 
   Status WriteUnbuffered(const char* data, size_t size) {
     // Variables for libzbc zones
+    ssize_t sector_count;
     struct zbc_zone *zones = nullptr;
     struct zbc_zone *target_zone = nullptr;
     unsigned int nr_zones;
+    long long zone_ofst = 0;
+    long long sector_ofst;
 
     // ZNS device open
     ssize_t ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
@@ -374,8 +377,22 @@ class PosixWritableFile final : public WritableFile {
     }
 
     while (size > 0) {
-      // ret = zbc_pwrite(dev_, (void *) data, )
+      sector_count = size >> 9;
+      sector_ofst = zbc_zone_start(target_zone) + zone_ofst;
+
+      ret = zbc_pwrite(dev_, (void *) data, sector_count, sector_ofst);
+      if (ret <= 0) {
+        fprintf(stderr, "%s failed %zd (%s)\n", "zbc_pwrite", -ret, strerror(-ret));
+        zbc_close(dev_);
+        free(zones);
+        return PosixError(path_, errno);
+      }
+
+      zone_ofst += ret;
+      data += ret;
+      size -= ret;
     }
+    
     return Status::OK();
   }
 
