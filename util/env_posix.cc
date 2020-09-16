@@ -255,15 +255,9 @@ class PosixMmapReadableFile final : public RandomAccessFile {
 
 class PosixWritableFile final : public WritableFile {
  public:
-<<<<<<< HEAD
-  PosixWritableFile(std::string filename, int zone_num, zbc_device *dev, std::string path)
-      : pos_(0),
-        zone_num_(zone_num),
-=======
-  PosixWritableFile(std::string filename, int zone_number)
+  PosixWritableFile(std::string filename, int zone_number, zbc_device *dev, std::string path)
       : pos_(0),
         zone_number_(zone_number),
->>>>>>> 46a25fcc89415fc53fbd286ce3ac51cc6afc19fb
         is_manifest_(IsManifest(filename)),
         filename_(std::move(filename)),
         dirname_(Dirname(filename_)),
@@ -346,7 +340,6 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status WriteUnbuffered(const char* data, size_t size) {
-<<<<<<< HEAD
     // Variables for libzbc zones
     struct zbc_zone *zones = nullptr;
     struct zbc_zone *target_zone = nullptr;
@@ -359,15 +352,6 @@ class PosixWritableFile final : public WritableFile {
         fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
       } else {  
         fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
-=======
-    while (size > 0) {
-      ssize_t write_result = ::write(zone_number_, data, size); //libzbc write
-      if (write_result < 0) {
-        if (errno == EINTR) {
-          continue;  // Retry
-        }
-        return PosixError(filename_, errno);
->>>>>>> 46a25fcc89415fc53fbd286ce3ac51cc6afc19fb
       }
       return PosixError(path_, errno);
     }
@@ -490,7 +474,7 @@ class PosixWritableFile final : public WritableFile {
   // zbc device
   struct zbc_device *dev_;
   std::string path_;
-  int zone_num_;
+  int zone_number_;
 };
 
 int LockOrUnlock(int zoneNumber, bool lock) {
