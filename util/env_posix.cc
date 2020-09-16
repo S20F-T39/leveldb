@@ -35,6 +35,8 @@
 #include "util/env_posix_test_helper.h"
 #include "util/posix_logger.h"
 
+#include <libzbc/zbc.h>
+
 namespace leveldb {
 
 namespace {
@@ -248,12 +250,14 @@ class PosixMmapReadableFile final : public RandomAccessFile {
 
 class PosixWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(std::string filename, int fd)
+  PosixWritableFile(std::string filename, int zone_num, zbc_device *dev, std::string path)
       : pos_(0),
-        fd_(fd),
+        zone_num_(zone_num),
         is_manifest_(IsManifest(filename)),
         filename_(std::move(filename)),
-        dirname_(Dirname(filename_)) {}
+        dirname_(Dirname(filename_)),
+        dev_(dev),
+        path_(path) {}
 
   ~PosixWritableFile() override {
     if (fd_ >= 0) {
@@ -330,16 +334,41 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status WriteUnbuffered(const char* data, size_t size) {
-    while (size > 0) {
-      ssize_t write_result = ::write(fd_, data, size);
-      if (write_result < 0) {
-        if (errno == EINTR) {
-          continue;  // Retry
-        }
-        return PosixError(filename_, errno);
+    // Variables for libzbc zones
+    struct zbc_zone *zones = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+    unsigned int nr_zones;
+
+    // ZNS device open
+    ssize_t ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
+    if (ret != 0) {
+      if (ret == -ENODEV) {
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
+      } else {  
+        fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
       }
-      data += write_result;
-      size -= write_result;
+      return PosixError(path_, errno);
+    }
+
+    // Get all device zones
+    ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev_);
+      free(zones);
+      return PosixError(path_, errno);
+    }
+
+    // Set target zone and check target zone is Sequential
+    target_zone = &zones[zone_num_];
+    if (!zbc_zone_sequential(target_zone)) {
+      errno = EINVAL;
+      perror("Invalid or Cannot find sequential zone\n");
+      return PosixError(path_, errno);
+    }
+
+    while (size > 0) {
+      // ret = zbc_pwrite(dev_, (void *) data, )
     }
     return Status::OK();
   }
@@ -434,6 +463,11 @@ class PosixWritableFile final : public WritableFile {
   const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
   const std::string dirname_;  // The directory of filename_.
+
+  // zbc device
+  struct zbc_device *dev_;
+  std::string path_;
+  int zone_num_;
 };
 
 int LockOrUnlock(int fd, bool lock) {
