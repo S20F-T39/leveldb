@@ -26,7 +26,7 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <map>
+#include <hash_map>
 #include <string>
 
 #include "leveldb/env.h"
@@ -682,7 +682,9 @@ class PosixEnv : public Env {
 
   Status NewSequentialFile(const std::string& filename,
                            SequentialFile** result) override {
-    int zone_number = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc
+    
+    // Zone Mapping 
+    int zone_number = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
     if (zone_number < 0) {
       *result = nullptr;
       return PosixError(filename, errno);
@@ -694,8 +696,10 @@ class PosixEnv : public Env {
 
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
+    
+    // zone mapping
     *result = nullptr;
-    int zone_number = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags); //libzbc
+    int zone_number = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
     if (zone_number < 0) {
       return PosixError(filename, errno);
     }
@@ -718,7 +722,7 @@ class PosixEnv : public Env {
       //   status = PosixError(filename, errno);
       // }
     }
-    ::close(zone_number); //libzbc
+    ::close(zone_number);
     if (!status.ok()) {
       mmap_limiter_.Release();
     }
