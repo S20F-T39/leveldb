@@ -26,7 +26,7 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <hash_map>
+#include <map>
 #include <string>
 
 #include "leveldb/env.h"
@@ -243,17 +243,6 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     long long sector_ofst;
 
     if (!has_permanent_fd_) {
-      // ZNS device open
-      ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
-      if (ret != 0) {
-        if (ret == -ENODEV) {
-          fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
-        } else {  
-          fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
-        }
-        return PosixError(path_, errno);
-      }
-
       // Get all device zones
       ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
       if (ret != 0) {
@@ -284,7 +273,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     assert(zone_number != -1);
 
     zbc_pread(dev_, scratch, sector_count, sector_ofst);
-    ret = zbc_pread(dev_, scratch, n static_cast<off_t>(offset));
+    ret = zbc_pread(dev_, scratch, n, static_cast<off_t>(offset));
     *result = Slice(scratch, (ret < 0) ? 0 : ret);
     if (ret < 0) {
       // An error: return a non-ok status.
@@ -400,8 +389,8 @@ class PosixWritableFile final : public WritableFile {
 
   Status Close() override {
     Status status = FlushBuffer();
-    const int close_result = ::close(fd_);
-    if (close_result < 0 && status.ok()) {
+    ssize_t ret = zbc_zone_operation(dev_, sector_ofst, ZBC_OP_CLOSE_ZONE, 0);
+    if (ret < 0 && status.ok()) {
       status = PosixError(filename_, errno);
     }
     zone_number_ = -1;
@@ -439,6 +428,7 @@ class PosixWritableFile final : public WritableFile {
 
   Status WriteUnbuffered(const char* data, size_t size) {
     // Variables for zbc zones
+    ssize_t ret;
     ssize_t sector_count;
     struct zbc_zone *zones = nullptr;
     struct zbc_zone *target_zone = nullptr;
@@ -452,15 +442,15 @@ class PosixWritableFile final : public WritableFile {
       fprintf(stderr, "zbc_list_zones failed\n");
       zbc_close(dev_);
       free(zones);
-      return PosixError(path_, errno);
+      return PosixError(filename_, errno);
     }
 
     // Set target zone and check target zone is Sequential
-    target_zone = &zones[zone_num_];
+    target_zone = &zones[zone_number_];
     if (!zbc_zone_sequential(target_zone)) {
       errno = EINVAL;
       perror("Invalid or Cannot find sequential zone\n");
-      return PosixError(path_, errno);
+      return PosixError(filename_, errno);
     }
 
     while (size > 0) {
@@ -472,7 +462,7 @@ class PosixWritableFile final : public WritableFile {
         fprintf(stderr, "%s failed %zd (%s)\n", "zbc_pwrite", -ret, strerror(-ret));
         zbc_close(dev_);
         free(zones);
-        return PosixError(path_, errno);
+        return PosixError(filename_, errno);
       }
 
       zone_ofst += ret;
@@ -484,8 +474,7 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status SyncDirIfManifest() {
-    ssize_t ret, sector_count;
-    long long sector_ofst;
+    ssize_t ret;
 
     Status status;
 
@@ -495,24 +484,13 @@ class PosixWritableFile final : public WritableFile {
       return status;
     }
 
-    // ZNS device open
-    ret = zbc_open(path_.c_str(), O_RDWR, &dev_);
-    if (ret != 0) {
-      if (ret == -ENODEV) {
-        fprintf(stderr, "Open %s failed (not a zoned block device)\n",path_.c_str());
-      } else {  
-        fprintf(stderr, "Open %s failed (%s)\n", path_.c_str(), strerror(-ret));
-      }
-      return PosixError(path_, errno);
-    }
-
     // Get all device zones
     ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
     if (ret != 0) {
       fprintf(stderr, "zbc_list_zones failed\n");
       zbc_close(dev_);
       free(zones);
-      return PosixError(path_, errno);
+      return PosixError(filename_, errno);
     }
 
     // Set target zone and check target zone is Sequential
@@ -520,20 +498,17 @@ class PosixWritableFile final : public WritableFile {
     if (!zbc_zone_sequential(target_zone)) {
       errno = EINVAL;
       perror("Invalid or Cannot find sequential zone\n");
-      return PosixError(path_, errno);
+      return PosixError(filename_, errno);
     }
 
-    sector_count = n >> 9;
-    sector_ofst = zbc_zone_start(target_zone);
-
-    ret = zbc_zone_operation(dev_, sector_ofst, ZBC_OP_OPEN_ZONE, 0);
+    ret = zbc_zone_operation(dev_, zbc_zone_start(target_zone), ZBC_OP_OPEN_ZONE, 0);
 
     if (ret < 0) {
       status = PosixError(dirname_, errno);
     } else {
       //status = SyncFd(zone_number, dirname_);
       status = Status::OK();
-      zbc_zone_operation(dev_, sector_ofst, ZBC_OP_CLOSE_ZONE, 0);
+      zbc_zone_operation(dev_, zbc_zone_start(target_zone), ZBC_OP_CLOSE_ZONE, 0);
     }
     return status;
   }
@@ -607,7 +582,6 @@ class PosixWritableFile final : public WritableFile {
   // buf_[0, pos_ - 1] contains data to be written to fd_.
   char buf_[kWritableFileBufferSize];
   size_t pos_;
-  int zone_number_;
 
   const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
