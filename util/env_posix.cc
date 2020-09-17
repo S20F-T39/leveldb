@@ -168,36 +168,58 @@ class PosixRandomAccessFile final : public RandomAccessFile {
  public:
   // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
   // instance, and will be used to determine if .
-  PosixRandomAccessFile(zbc_device *dev, zbc_zone *target_zone)
-      : dev_(dev),
-        target_zone_(target_zone) {}
+  PosixRandomAccessFile(std::string filename, int fd, Limiter* fd_limiter)
+      : has_permanent_fd_(fd_limiter->Acquire()),
+        fd_(has_permanent_fd_ ? fd : -1),
+        fd_limiter_(fd_limiter),
+        filename_(std::move(filename)) {
+    if (!has_permanent_fd_) {
+      assert(fd_ == -1);
+      ::close(fd);  // The file will be opened on every read.
+    }
+  }
 
   ~PosixRandomAccessFile() override {
-    zbc_close(dev_);
+    if (has_permanent_fd_) {
+      assert(fd_ != -1);
+      ::close(fd_);
+      fd_limiter_->Release();
+    }
   }
+
 
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
-    ssize_t ret;
-
-    // Variables for zbc zones
-    ssize_t sector_count;
-    long long zone_ofst = 0;
-    long long sector_ofst;
-
-    ret = zbc_pread(dev_, scratch, n, static_cast<off_t>(offset));
-    *result = Slice(scratch, (ret < 0) ? 0 : ret);
-    if (ret < 0) {
-      zbc_close(dev_);
-      // An error: return a non-ok status.
-      return PosixError("Random Access", errno);
+    int fd = fd_;
+    if (!has_permanent_fd_) {
+      fd = ::open(filename_.c_str(), O_RDONLY | kOpenBaseFlags);
+      if (fd < 0) {
+        return PosixError(filename_, errno);
+      }
     }
-    return Status::OK();
+
+    assert(fd != -1);
+
+    Status status;
+    ssize_t read_size = ::pread(fd, scratch, n, static_cast<off_t>(offset));
+    *result = Slice(scratch, (read_size < 0) ? 0 : read_size);
+    if (read_size < 0) {
+      // An error: return a non-ok status.
+      status = PosixError(filename_, errno);
+    }
+    if (!has_permanent_fd_) {
+      // Close the temporary file descriptor opened earlier.
+      assert(fd != fd_);
+      ::close(fd);
+    }
+    return status;
   }
 
  private:
-  struct zbc_device *dev_;
-  struct zbc_zone *target_zone_;
+  const bool has_permanent_fd_;  // If false, the file is opened on every read.
+  const int fd_;                 // -1 if has_permanent_fd_ is false.
+  Limiter* const fd_limiter_;
+  const std::string filename_;
 };
 
 // Implements random read access in a file using mmap().
@@ -567,44 +589,36 @@ class PosixEnv : public Env {
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
     *result = nullptr;
-
-    std::string path = "/dev/sda";
-    ssize_t ret;
-    struct zbc_device *dev = nullptr;
-    struct zbc_zone *zone_list = nullptr;
-    struct zbc_zone *target_zone = nullptr;
-    unsigned int nr_zones;
-
-    // Open ZNS Device
-    ret = zbc_open(path.c_str(), O_RDWR, &dev);
-    if (ret != 0) {
-      if (ret == - ENODEV) 
-        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
-      else
-        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
-      return PosixError(path, errno);
+    int fd = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
+    if (fd < 0) {
+      return PosixError(filename, errno);
     }
 
-    // Get Zone Lists
-    ret = zbc_list_zones(dev, 0, ZBC_RO_ALL, &zone_list, &nr_zones);
-    if (ret != 0) {
-      fprintf(stderr, "zbc_list_zones failed\n");
-      zbc_close(dev);
-      free(zone_list);
-      return PosixError(path, errno);
+    if (!mmap_limiter_.Acquire()) {
+      *result = new PosixRandomAccessFile(filename, fd, &fd_limiter_);
+      return Status::OK();
     }
 
-    // zone_number 를 filename 통해서 꺼내와야 함.
-    // ex) int zone_number = map["MANIFEST-000001"];
-    int zone_number = 128;
-    target_zone = &zone_list[zone_number];
-
-    *result = new PosixRandomAccessFile(dev, target_zone);
-
-    zbc_close(dev);
-
-    return Status::OK();
+    uint64_t file_size;
+    Status status = GetFileSize(filename, &file_size);
+    if (status.ok()) {
+      void* mmap_base =
+          ::mmap(/*addr=*/nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
+      if (mmap_base != MAP_FAILED) {
+        *result = new PosixMmapReadableFile(filename,
+                                            reinterpret_cast<char*>(mmap_base),
+                                            file_size, &mmap_limiter_);
+      } else {
+        status = PosixError(filename, errno);
+      }
+    }
+    ::close(fd);
+    if (!status.ok()) {
+      mmap_limiter_.Release();
+    }
+    return status;
   }
+
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
@@ -740,7 +754,10 @@ class PosixEnv : public Env {
   }
 
   bool FileExists(const std::string& filename) override {
-    return ::access(filename.c_str(), F_OK) == 0;
+    // return ::access(filename.c_str(), F_OK) == 0;
+    // map 내부에 key 가져올 수 있는가?
+    // 그렇다면 해당 filename 이 map 내에 있으면 true, 없으면 false
+    return false;
   }
 
   Status GetChildren(const std::string& directory_path,
@@ -759,23 +776,23 @@ class PosixEnv : public Env {
   }
 
   Status RemoveFile(const std::string& filename) override {
-    if (::unlink(filename.c_str()) != 0) { //libzbc remove
-      return PosixError(filename, errno);
-    }
+    // if (::unlink(filename.c_str()) != 0) {
+    //   return PosixError(filename, errno);
+    // }
     return Status::OK();
   }
 
   Status CreateDir(const std::string& dirname) override {
-    if (::mkdir(dirname.c_str(), 0755) != 0) { //libzbc
-      return PosixError(dirname, errno);
-    }
+    // if (::mkdir(dirname.c_str(), 0755) != 0) {
+    //   return PosixError(dirname, errno);
+    // }
     return Status::OK();
   }
 
   Status RemoveDir(const std::string& dirname) override {
-    if (::rmdir(dirname.c_str()) != 0) {
-      return PosixError(dirname, errno);
-    }
+    // if (::rmdir(dirname.c_str()) != 0) {
+    //   return PosixError(dirname, errno);
+    // }
     return Status::OK();
   }
 
@@ -790,9 +807,9 @@ class PosixEnv : public Env {
   }
 
   Status RenameFile(const std::string& from, const std::string& to) override {
-    if (std::rename(from.c_str(), to.c_str()) != 0) {
-      return PosixError(from, errno);
-    }
+    // if (std::rename(from.c_str(), to.c_str()) != 0) {
+    //   return PosixError(from, errno);
+    // }
     return Status::OK();
   }
 
