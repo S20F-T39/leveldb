@@ -522,13 +522,17 @@ int LockOrUnlock(int zoneNumber, bool lock) {
 // Instances are thread-safe because they are immutable.
 class PosixFileLock : public FileLock {
  public:
-  PosixFileLock(int zone_number, std::string filename)
-      : zone_number_(zone_number), filename_(std::move(filename)) {}
+  PosixFileLock(int zone_number, std::string filename, zbc_device *dev)
+      : zone_number_(zone_number), 
+        filename_(std::move(filename)),
+        dev_(dev) {}
 
   int zone_number() const { return zone_number_; }
   const std::string& filename() const { return filename_; }
+  struct zbc_device* dev() const { return dev_; }
 
  private:
+  struct zbc_device *dev_;
   const int zone_number_;
   const std::string filename_;
 };
@@ -849,24 +853,66 @@ class PosixEnv : public Env {
   Status LockFile(const std::string& filename, FileLock** lock) override {
     *lock = nullptr;
 
-    int zone_number = ::open(filename.c_str(), O_RDWR | O_CREAT | kOpenBaseFlags, 0644);  //libzbc
-    if (zone_number < 0) {
-      return PosixError(filename, errno);
+    std::string path = "/dev/sda";
+    ssize_t ret;
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *zone_list = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+    unsigned int nr_zones;
+    int zone_number;
+
+    // Open ZBC Device
+    ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError(path, errno);
+    }
+
+    // Get Zone Lists
+    ret = zbc_list_zones(dev, 0, ZBC_RO_ALL, &zone_list, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev);
+      free(zone_list);
+      return PosixError(path, errno);
+    }
+
+    // LOCK File 넣어 줄 target_zone 필요함.
+    // 해당 알고리즘 필요.
+    zone_number = 128;
+    target_zone = &zone_list[zone_number];
+
+    // filename : zone number mapping 필요.
+
+    // 해당 target_zone 정했다면, zone_open
+    ret = zbc_open_zone(dev, zbc_zone_start(target_zone), 0);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_open_zone failed\n");
+      return PosixError(path, errno);
     }
 
     if (!locks_.Insert(filename)) {
-      ::close(zone_number);
+      // ZBC Device Close.
+      zbc_close(dev);
       return Status::IOError("lock " + filename, "already held by process");
     }
 
     if (LockOrUnlock(zone_number, true) == -1) {
+      // ZBC Device Close.
       int lock_errno = errno;
-      ::close(zone_number); //libzbc
+      zbc_close(dev);
       locks_.Remove(filename);
       return PosixError("lock " + filename, lock_errno);
     }
 
-    *lock = new PosixFileLock(zone_number, filename);
+    *lock = new PosixFileLock(zone_number, filename, dev);
+
+    zbc_close(dev);
+    free(zone_list);
+
     return Status::OK();
   }
 
@@ -876,7 +922,8 @@ class PosixEnv : public Env {
       return PosixError("unlock " + posix_file_lock->filename(), errno);
     }
     locks_.Remove(posix_file_lock->filename());
-    ::close(posix_file_lock->zone_number());
+    // ZBC Device Close.
+    zbc_close(posix_file_lock->dev());
     delete posix_file_lock;
     return Status::OK();
   }
@@ -902,7 +949,8 @@ class PosixEnv : public Env {
     }
 
     // The CreateDir status is ignored because the directory may already exist.
-    CreateDir(*result);
+    // libzbc 사용 시 Dir 필요가 없으므로, CreateDir 수행하지 않도록 수정.
+    // CreateDir(*result);
 
     return Status::OK();
   }
