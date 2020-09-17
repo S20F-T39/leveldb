@@ -332,12 +332,12 @@ class PosixWritableFile final : public WritableFile {
     // This needs to happen before the manifest file is flushed to disk, to
     // avoid crashing in a state where the manifest refers to files that are not
     // yet on disk.
-    Status status = SyncDirIfManifest();
-    if (!status.ok()) {
-      return status;
-    }
+    // Status status = SyncDirIfManifest();
+    // if (!status.ok()) {
+    //   return status;
+    // }
 
-    status = FlushBuffer();
+    Status status = FlushBuffer();
     if (!status.ok()) {
       return status;
     }
@@ -395,7 +395,7 @@ class PosixWritableFile final : public WritableFile {
     //   status = SyncFd(fd, dirname_);
     //   ::close(fd);
     // }
-    return status;
+    return Status::OK();
   }
 
   // Ensures that all the caches associated with the given file descriptor's
