@@ -168,91 +168,36 @@ class PosixRandomAccessFile final : public RandomAccessFile {
  public:
   // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
   // instance, and will be used to determine if .
-  PosixRandomAccessFile(std::string filename, int fd, Limiter* fd_limiter)
-      : has_permanent_fd_(fd_limiter->Acquire()),
-        zone_number_(has_permanent_fd_ ? fd : -1),
-        fd_limiter_(fd_limiter),
-        filename_(std::move(filename)) {
-    if (!has_permanent_fd_) {
-      assert(zone_number_ == -1);
-      zbc_close(dev_);
-    }
-  }
+  PosixRandomAccessFile(zbc_device *dev, zbc_zone *target_zone)
+      : dev_(dev),
+        target_zone_(target_zone) {}
 
   ~PosixRandomAccessFile() override {
-    if (has_permanent_fd_) {
-      assert(zone_number_ != -1);
-      zbc_close(dev_);
-      fd_limiter_->Release();
-    }
+    zbc_close(dev_);
   }
 
   Status Read(uint64_t offset, size_t n, Slice* result,
               char* scratch) const override {
-    int zone_number = zone_number_;
     ssize_t ret;
 
     // Variables for zbc zones
     ssize_t sector_count;
-    struct zbc_zone *zones = nullptr;
-    struct zbc_zone *target_zone = nullptr;
-    unsigned int nr_zones;
     long long zone_ofst = 0;
     long long sector_ofst;
 
-    if (!has_permanent_fd_) {
-      // Get all device zones
-      ret = zbc_list_zones(dev_, 0, ZBC_RO_ALL, &zones, &nr_zones);
-      if (ret != 0) {
-        fprintf(stderr, "zbc_list_zones failed\n");
-        zbc_close(dev_);
-        free(zones);
-        return PosixError(path_, errno);
-      }
-
-      // Set target zone and check target zone is Sequential
-      target_zone = &zones[zone_number_];
-      if (!zbc_zone_sequential(target_zone)) {
-        errno = EINVAL;
-        perror("Invalid or Cannot find sequential zone\n");
-        return PosixError(path_, errno);
-      }
-
-      sector_count = n >> 9;
-      sector_ofst = zbc_zone_start(target_zone) + zone_ofst;
-
-      ret = zbc_zone_operation(dev_, sector_ofst, ZBC_OP_OPEN_ZONE, 0);
-
-      if (ret < 0) {
-        return PosixError(filename_, errno);
-      }
-    }
-
-    assert(zone_number != -1);
-
-    zbc_pread(dev_, scratch, sector_count, sector_ofst);
     ret = zbc_pread(dev_, scratch, n, static_cast<off_t>(offset));
     *result = Slice(scratch, (ret < 0) ? 0 : ret);
     if (ret < 0) {
+      zbc_close(dev_);
       // An error: return a non-ok status.
-      return PosixError(filename_, errno);
-    }
-    if (!has_permanent_fd_) {
-      // Close the temporary file descriptor opened earlier.
-      assert(zone_number != zone_number_);
-      zbc_zone_operation(dev_, zbc_zone_start(target_zone), ZBC_OP_CLOSE_ZONE, 0);
+      return PosixError("Random Access", errno);
     }
     return Status::OK();
   }
 
  private:
-  const bool has_permanent_fd_;  // If false, the file is opened on every read.
-  const int zone_number_;                 // -1 if has_permanent_fd_ is false.
-  Limiter* const fd_limiter_;
-  const std::string filename_;
-
   struct zbc_device *dev_;
-  std::string path_;
+  struct zbc_zone *target_zone_;
 };
 
 // Implements random read access in a file using mmap().
@@ -375,9 +320,8 @@ class PosixWritableFile final : public WritableFile {
       return status;
     }
 
-    // TODO No Sync...?
-    //return SyncFd(fd_, filename_);
-    return Status::OK();
+    // return SyncFd(zone_number, filename_);
+    return status;
   }
 
  private:
@@ -399,11 +343,14 @@ class PosixWritableFile final : public WritableFile {
       sector_ofst = zbc_zone_start(target_zone_) + zone_ofst;
 
       ret = zbc_pwrite(dev_, (void *) data, sector_count, sector_ofst);
-      if (ret <= 0) {
+      if (ret < 0) {
         fprintf(stderr, "%s failed %zd (%s)\n", "zbc_pwrite", -ret, strerror(-ret));
         zbc_close(dev_);
         return PosixError(filename_, errno);
       }
+
+      // LOCK File 같이 빈 File 들은 ret = 0.
+      if (ret == 0) break;
 
       zone_ofst += ret;
       data += ret;
@@ -419,13 +366,13 @@ class PosixWritableFile final : public WritableFile {
       return status;
     }
 
-    int fd = ::open(dirname_.c_str(), O_RDONLY | kOpenBaseFlags);
-    if (fd < 0) {
-      status = PosixError(dirname_, errno);
-    } else {
-      status = SyncFd(fd, dirname_);
-      ::close(fd);
-    }
+    // int fd = ::open(dirname_.c_str(), O_RDONLY | kOpenBaseFlags);
+    // if (fd < 0) {
+    //   status = PosixError(dirname_, errno);
+    // } else {
+    //   status = SyncFd(fd, dirname_);
+    //   ::close(fd);
+    // }
     return status;
   }
 
@@ -507,16 +454,8 @@ class PosixWritableFile final : public WritableFile {
   struct zbc_zone *target_zone_;
 };
 
-int LockOrUnlock(int zoneNumber, bool lock) {
-  errno = 0;
-  struct ::flock file_lock_info;
-  std::memset(&file_lock_info, 0, sizeof(file_lock_info));
-  file_lock_info.l_type = (lock ? F_WRLCK : F_UNLCK);
-  file_lock_info.l_whence = SEEK_SET;
-  file_lock_info.l_start = 0;
-  file_lock_info.l_len = 0;  // Lock/unlock entire file.
-  return ::fcntl(zoneNumber, F_SETLK, &file_lock_info);
-  //여기 return 대신 libzbc close 사용
+int LockOrUnlock(int zone_number, bool lock) {
+  return zone_number;
 }
 
 // Instances are thread-safe because they are immutable.
@@ -625,40 +564,47 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
-  // --------------------- Normal leveldb ---------------------------
   Status NewRandomAccessFile(const std::string& filename,
                              RandomAccessFile** result) override {
     *result = nullptr;
-    int fd = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
-    if (fd < 0) {
-      return PosixError(filename, errno);
+
+    std::string path = "/dev/sda";
+    ssize_t ret;
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *zone_list = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+    unsigned int nr_zones;
+
+    // Open ZNS Device
+    ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError(path, errno);
     }
 
-    if (!mmap_limiter_.Acquire()) {
-      *result = new PosixRandomAccessFile(filename, fd, &fd_limiter_);
-      return Status::OK();
+    // Get Zone Lists
+    ret = zbc_list_zones(dev, 0, ZBC_RO_ALL, &zone_list, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev);
+      free(zone_list);
+      return PosixError(path, errno);
     }
 
-    uint64_t file_size;
-    Status status = GetFileSize(filename, &file_size);
-    if (status.ok()) {
-      void* mmap_base =
-          ::mmap(/*addr=*/nullptr, file_size, PROT_READ, MAP_SHARED, fd, 0);
-      if (mmap_base != MAP_FAILED) {
-        *result = new PosixMmapReadableFile(filename,
-                                            reinterpret_cast<char*>(mmap_base),
-                                            file_size, &mmap_limiter_);
-      } else {
-        status = PosixError(filename, errno);
-      }
-    }
-    ::close(fd);
-    if (!status.ok()) {
-      mmap_limiter_.Release();
-    }
-    return status;
+    // zone_number 를 filename 통해서 꺼내와야 함.
+    // ex) int zone_number = map["MANIFEST-000001"];
+    int zone_number = 128;
+    target_zone = &zone_list[zone_number];
+
+    *result = new PosixRandomAccessFile(dev, target_zone);
+
+    zbc_close(dev);
+
+    return Status::OK();
   }
-  // ----------------------------------------------------------------
 
   Status NewWritableFile(const std::string& filename,
                          WritableFile** result) override {
@@ -800,15 +746,15 @@ class PosixEnv : public Env {
   Status GetChildren(const std::string& directory_path,
                      std::vector<std::string>* result) override {
     result->clear();
-    ::DIR* dir = ::opendir(directory_path.c_str());
-    if (dir == nullptr) {
-      return PosixError(directory_path, errno);
-    }
-    struct ::dirent* entry;
-    while ((entry = ::readdir(dir)) != nullptr) {
-      result->emplace_back(entry->d_name);
-    }
-    ::closedir(dir);
+    // ::DIR* dir = ::opendir(directory_path.c_str());
+    // if (dir == nullptr) {
+    //   return PosixError(directory_path, errno);
+    // }
+    // struct ::dirent* entry;
+    // while ((entry = ::readdir(dir)) != nullptr) {
+    //   result->emplace_back(entry->d_name);
+    // }
+    // ::closedir(dir);
     return Status::OK();
   }
 
@@ -956,22 +902,39 @@ class PosixEnv : public Env {
   }
 
   Status NewLogger(const std::string& filename, Logger** result) override {
-    int zone_number = ::open(filename.c_str(),
-                    O_APPEND | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644); //libzbc
-    if (zone_number < 0) {
+    std::string path = "/dev/sda";
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *zone_list = nullptr;
+    unsigned int nr_zones;
+    
+    // Open ZBC Device
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError(path, errno);
+    }
+
+    // Get Zone Lists
+    ret = zbc_list_zones(dev, 0, ZBC_RO_ALL, &zone_list, &nr_zones);
+    if (ret != 0) {
+      fprintf(stderr, "zbc_list_zones failed\n");
+      zbc_close(dev);
+      free(zone_list);
+      return PosixError(path, errno);
+    }
+
+    // filename : zone number mapping here
+    int zone_number = 128;
+
+    std::FILE* fp = nullptr;
+    if (fp == nullptr) {
+      zbc_close(dev);
       *result = nullptr;
       return PosixError(filename, errno);
     }
-
-    // std::FILE* fp = ::fdopen(fd, "w");
-    // if (fp == nullptr) {
-    //   ::close(fd);
-    //   *result = nullptr;
-    //   return PosixError(filename, errno);
-    // } else {
-    //   *result = new PosixLogger(fp);
-    //   return Status::OK();
-    // }
     return Status::OK();
   }
 
