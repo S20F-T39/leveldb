@@ -83,23 +83,33 @@ Status ReadFileToString(Env* env, const std::string& fname, std::string* data) {
   SequentialFile* file;
   Status s = env->NewSequentialFile(fname, &file);
   if (!s.ok()) {
+    printf("ReadFileToString env->NewSequentialFile not ok.\n");
     return s;
   }
+
   static const int kBufferSize = 8192;
   char* space = new char[kBufferSize];
+
   while (true) {
     Slice fragment;
     s = file->Read(kBufferSize, &fragment, space);
+	fprintf(stderr,"ReadFileToString Couter\n");
     if (!s.ok()) {
+      printf("ReadFileToString file->Read not ok.\n");
       break;
     }
+	fprintf(stderr, "fragment is : ");
+	fprintf(stderr, fragment.ToString().c_str());
+	fprintf(stderr, "\n");
     data->append(fragment.data(), fragment.size());
     if (fragment.empty()) {
       break;
     }
   }
+
   delete[] space;
   delete file;
+
   return s;
 }
 

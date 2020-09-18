@@ -130,9 +130,11 @@ Status SetCurrentFile(Env* env, const std::string& dbname,
   std::string tmp = TempFileName(dbname, descriptor_number);
   Status s = WriteStringToFileSync(env, contents.ToString() + "\n", tmp);
   if (s.ok()) {
+	fprintf(stderr,"WriteStringToFileSync is ok\n");
     s = env->RenameFile(tmp, CurrentFileName(dbname));
   }
   if (!s.ok()) {
+	fprintf(stderr, "WriteStringToFielSync is not ok remove File\n");
     env->RemoveFile(tmp);
   }
   return s;
