@@ -870,8 +870,18 @@ Status VersionSet::Recover(bool* save_manifest) {
   // Read "CURRENT" file, which contains a pointer to the current manifest file
   std::string current;
   Status s = ReadFileToString(env_, CurrentFileName(dbname_), &current);
+  fprintf(stderr, "current file name is ");
+  fprintf(stderr, CurrentFileName(dbname_).c_str());
+  fprintf(stderr, "\n");
   if (!s.ok()) {
+    printf("VersionSet::Recover ReadFileToString not ok.\n");
     return s;
+  }
+  if(current.empty()){
+  	fprintf(stderr,"current is empty\n");
+  }
+  if(current[current.size() - 1] != '\n'){
+  	fprintf(stderr,"current is not end with fuckin newline\n");
   }
   if (current.empty() || current[current.size() - 1] != '\n') {
     return Status::Corruption("CURRENT file does not end with newline");
@@ -883,8 +893,7 @@ Status VersionSet::Recover(bool* save_manifest) {
   s = env_->NewSequentialFile(dscname, &file);
   if (!s.ok()) {
     if (s.IsNotFound()) {
-      return Status::Corruption("CURRENT points to a non-existent file",
-                                s.ToString());
+      return Status::Corruption("CURRENT points to a non-existent file", s.ToString());
     }
     return s;
   }

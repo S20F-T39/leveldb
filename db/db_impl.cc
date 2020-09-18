@@ -189,6 +189,7 @@ Status DBImpl::NewDB() {
   WritableFile* file;
   Status s = env_->NewWritableFile(manifest, &file);
   if (!s.ok()) {
+    printf("DBImpl::NewDB NewWritableFile not ok\n");
     return s;
   }
   {
@@ -197,14 +198,17 @@ Status DBImpl::NewDB() {
     new_db.EncodeTo(&record);
     s = log.AddRecord(record);
     if (s.ok()) {
+      printf("DBImpl::NewDB LogFile AddRecord ok\n");
       s = file->Close();
     }
   }
   delete file;
   if (s.ok()) {
+		printf("DBImpl::NewDB File Close ok.\n");
     // Make "CURRENT" file that points to the new manifest file.
     s = SetCurrentFile(env_, dbname_, 1);
   } else {
+		printf("DBImpl::NewDB File Close not ok.\n");
     env_->RemoveFile(manifest);
   }
   return s;
@@ -295,29 +299,32 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   env_->CreateDir(dbname_);
   assert(db_lock_ == nullptr);
   Status s = env_->LockFile(LockFileName(dbname_), &db_lock_);
-  if (!s.ok()) {
+	if(!s.ok()){
+    printf("DBImpl::Recover LockFile is not ok.\n");
     return s;
   }
 
   if (!env_->FileExists(CurrentFileName(dbname_))) {
+    printf("DBImpl::Recover \"%s\" not exists.\n", dbname_);
     if (options_.create_if_missing) {
       s = NewDB();
       if (!s.ok()) {
+			  printf("DBImpl::Recover NewDB is not ok.\n");
         return s;
       }
     } else {
-      return Status::InvalidArgument(
-          dbname_, "does not exist (create_if_missing is false)");
+      return Status::InvalidArgument(dbname_, "does not exist (create_if_missing is false)");
     }
   } else {
+    printf("DBImpl::Recover \"%s\" exists.\n", dbname_);
     if (options_.error_if_exists) {
-      return Status::InvalidArgument(dbname_,
-                                     "exists (error_if_exists is true)");
+      return Status::InvalidArgument(dbname_, "exists (error_if_exists is true)");
     }
   }
 
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
+		printf("DBImpl::Recover versions_->Recover not ok.\n");
     return s;
   }
   SequenceNumber max_sequence(0);
@@ -1484,13 +1491,18 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   // Recover handles create_if_missing, error_if_exists
   bool save_manifest = false;
   Status s = impl->Recover(&edit, &save_manifest);
+  if (s.ok()){
+		printf("DB::Open DBImpl->Recover ok.\n");
+	}
   if (s.ok() && impl->mem_ == nullptr) {
+		  std::fprintf(stderr,"1488");
     // Create new log and a corresponding memtable.
     uint64_t new_log_number = impl->versions_->NewFileNumber();
     WritableFile* lfile;
-    s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
-                                     &lfile);
+    s = options.env->NewWritableFile(LogFileName(dbname, new_log_number), &lfile);
+
     if (s.ok()) {
+	    printf("NewWritableFile (LogFile) Complete\n");
       edit.SetLogNumber(new_log_number);
       impl->logfile_ = lfile;
       impl->logfile_number_ = new_log_number;
@@ -1503,6 +1515,9 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.
     edit.SetLogNumber(impl->logfile_number_);
     s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
+	if(s.ok()){
+		printf("DB::Open DBImpl->Recover ok.\n");
+	}
   }
   if (s.ok()) {
     impl->RemoveObsoleteFiles();
