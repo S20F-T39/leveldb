@@ -404,6 +404,9 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
 
   // Open the log file
   std::string fname = LogFileName(dbname_, log_number);
+  fprintf(stderr, "logFileNane : ");
+  fprintf(stderr, fname.c_str());
+  fprintf(stderr, "\n");
   SequentialFile* file;
   Status status = env_->NewSequentialFile(fname, &file);
   if (!status.ok()) {
@@ -521,6 +524,9 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     s = BuildTable(dbname_, env_, options_, table_cache_, iter, &meta);
     mutex_.Lock();
   }
+  if(!s.ok()){
+		fprintf(stderr,"Build Table Error!\n");	  
+	}
 
   Log(options_.info_log, "Level-0 table #%llu: %lld bytes %s",
       (unsigned long long)meta.number, (unsigned long long)meta.file_size,
@@ -539,6 +545,9 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     }
     edit->AddFile(level, meta.number, meta.file_size, meta.smallest,
                   meta.largest);
+  }
+  else {
+	
   }
 
   CompactionStats stats;
@@ -560,14 +569,19 @@ void DBImpl::CompactMemTable() {
   base->Unref();
 
   if (s.ok() && shutting_down_.load(std::memory_order_acquire)) {
+	fprintf(stderr, "Deleting DB during memtable compaction\n");
     s = Status::IOError("Deleting DB during memtable compaction");
   }
 
   // Replace immutable memtable with the generated Table
   if (s.ok()) {
+	fprintf(stderr, "compating.. not IO error\n");
     edit.SetPrevLogNumber(0);
     edit.SetLogNumber(logfile_number_);  // Earlier logs no longer needed
     s = versions_->LogAndApply(&edit, &mutex_);
+  }
+  else {
+	fprintf(stderr, "compacting,, IO error\n");
   }
 
   if (s.ok()) {
@@ -577,6 +591,7 @@ void DBImpl::CompactMemTable() {
     has_imm_.store(false, std::memory_order_release);
     RemoveObsoleteFiles();
   } else {
+	fprintf(stderr, "CompactMemTable Error!\n");
     RecordBackgroundError(s);
   }
 }

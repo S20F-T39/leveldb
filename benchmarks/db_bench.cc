@@ -60,7 +60,7 @@ static const char* FLAGS_benchmarks =
     "snappyuncomp,";
 
 // Number of key/values to place in database
-static int FLAGS_num = 1000;
+static int FLAGS_num = 1000000;
 
 // Number of read operations to do.  If negative, do FLAGS_num reads.
 static int FLAGS_reads = -1;
@@ -878,6 +878,7 @@ class Benchmark {
         std::snprintf(key, sizeof(key), "%016d", k);
         Status s = db_->Put(write_options_, key, gen.Generate(value_size_));
         if (!s.ok()) {
+          printf("ReadWhileWriting put error\n");
           std::fprintf(stderr, "put error: %s\n", s.ToString().c_str());
           std::exit(1);
         }

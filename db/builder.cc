@@ -25,6 +25,7 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
     WritableFile* file;
     s = env->NewWritableFile(fname, &file);
     if (!s.ok()) {
+	  fprintf(stderr,"BuildTable NewWritableFile Error!\n");
       return s;
     }
 
@@ -45,15 +46,25 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
       meta->file_size = builder->FileSize();
       assert(meta->file_size > 0);
     }
+	else {
+		fprintf(stderr,"finish error!\n");
+	}
     delete builder;
 
     // Finish and check for file errors
     if (s.ok()) {
       s = file->Sync();
     }
+	if(!s.ok()){
+		fprintf(stderr,"file sync error!\n");	
+	}
     if (s.ok()) {
       s = file->Close();
     }
+	if(!s.ok()){
+		fprintf(stderr,"file close error!\n");
+	}
+
     delete file;
     file = nullptr;
 
@@ -65,6 +76,9 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
       delete it;
     }
   }
+  if(!s.ok()){
+	fprintf(stderr,"iterator status is not ok!\n");
+  }
 
   // Check for input iterator errors
   if (!iter->status().ok()) {
@@ -74,6 +88,7 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
   if (s.ok() && meta->file_size > 0) {
     // Keep it
   } else {
+	fprintf(stderr,"iterator status not ok!\n");
     env->RemoveFile(fname);
   }
   return s;

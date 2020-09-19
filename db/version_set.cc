@@ -874,12 +874,6 @@ Status VersionSet::Recover(bool* save_manifest) {
     printf("VersionSet::Recover ReadFileToString not ok.\n");
     return s;
   }
-  if(current.empty()){
-  	fprintf(stderr,"current is empty\n");
-  }
-  if(current[current.size() - 1] != '\n'){
-  	fprintf(stderr,"current is not end with fuckin newline\n");
-  }
   if (current.empty() || current[current.size() - 1] != '\n') {
     return Status::Corruption("CURRENT file does not end with newline");
   }
