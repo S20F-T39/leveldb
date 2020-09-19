@@ -305,7 +305,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   }
 
   if (!env_->FileExists(CurrentFileName(dbname_))) {
-    printf("DBImpl::Recover \"%s\" not exists.\n", dbname_);
+    printf("DBImpl::Recover \"%s\" not exists.\n", dbname_.c_str());
     if (options_.create_if_missing) {
       s = NewDB();
       if (!s.ok()) {
@@ -316,7 +316,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
       return Status::InvalidArgument(dbname_, "does not exist (create_if_missing is false)");
     }
   } else {
-    printf("DBImpl::Recover \"%s\" exists.\n", dbname_);
+    printf("DBImpl::Recover \"%s\" exists.\n", dbname_.c_str());
     if (options_.error_if_exists) {
       return Status::InvalidArgument(dbname_, "exists (error_if_exists is true)");
     }
@@ -1495,7 +1495,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
 		printf("DB::Open DBImpl->Recover ok.\n");
 	}
   if (s.ok() && impl->mem_ == nullptr) {
-		  std::fprintf(stderr,"1488");
+		printf("DB::Open DBImpl->Recover ok and mem_ == nullptr\n");
     // Create new log and a corresponding memtable.
     uint64_t new_log_number = impl->versions_->NewFileNumber();
     WritableFile* lfile;

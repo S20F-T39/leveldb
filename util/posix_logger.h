@@ -17,6 +17,8 @@
 #include <sstream>
 #include <thread>
 
+#include <libzbc/zbc.h>
+
 #include "leveldb/env.h"
 
 namespace leveldb {
@@ -26,9 +28,13 @@ class PosixLogger final : public Logger {
   // Creates a logger that writes to the given file.
   //
   // The PosixLogger instance takes ownership of the file handle.
-  explicit PosixLogger(std::FILE* fp) : fp_(fp) { assert(fp != nullptr); }
+  explicit PosixLogger(zbc_device* dev, zbc_zone* target_zone) 
+    : dev_(dev),
+      target_zone_(target_zone) { assert(target_zone != nullptr); }
 
-  ~PosixLogger() override { std::fclose(fp_); }
+  ~PosixLogger() override { 
+    zbc_close(dev_); 
+  }
 
   void Logv(const char* format, std::va_list arguments) override {
     // Record the time as close to the Logv() call as possible.
@@ -111,8 +117,10 @@ class PosixLogger final : public Logger {
       }
 
       assert(buffer_offset <= buffer_size);
-      std::fwrite(buffer, 1, buffer_offset, fp_);
-      std::fflush(fp_);
+
+      // device 는 open 된 상태로 넘어오게 됨.
+      // write 만 시도하면 될듯 함.
+      ssize_t ret = zbc_pwrite(dev_, buffer, buffer_offset >> 9, target_zone_->zbz_write_pointer);
 
       if (iteration != 0) {
         delete[] buffer;
@@ -122,7 +130,8 @@ class PosixLogger final : public Logger {
   }
 
  private:
-  std::FILE* const fp_;
+  struct zbc_device *dev_;
+  struct zbc_zone *target_zone_;
 };
 
 }  // namespace leveldb

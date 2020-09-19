@@ -93,15 +93,13 @@ Status ReadFileToString(Env* env, const std::string& fname, std::string* data) {
   while (true) {
     Slice fragment;
     s = file->Read(kBufferSize, &fragment, space);
-	fprintf(stderr,"ReadFileToString Couter\n");
     if (!s.ok()) {
       printf("ReadFileToString file->Read not ok.\n");
       break;
     }
-	fprintf(stderr, "fragment is : ");
-	fprintf(stderr, fragment.ToString().c_str());
-	fprintf(stderr, "\n");
+    printf("ReadFileToString: Read Complete \"%s\"\n", fragment.ToString().c_str());
     data->append(fragment.data(), fragment.size());
+    break;
     if (fragment.empty()) {
       break;
     }
