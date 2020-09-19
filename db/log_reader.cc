@@ -196,6 +196,9 @@ unsigned int Reader::ReadPhysicalRecord(Slice* result) {
         // Last read was a full read, so this is a trailer to skip
         buffer_.clear();
         Status status = file_->Read(kBlockSize, &buffer_, backing_store_);
+		fprintf(stderr, "ReadPhysicalRecord : ");
+		fprintf(stderr, buffer_.ToString().c_str());
+		fprintf(stderr, "\n");
         end_of_buffer_offset_ += buffer_.size();
         if (!status.ok()) {
           buffer_.clear();
