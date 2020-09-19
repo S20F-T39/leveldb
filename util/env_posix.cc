@@ -126,9 +126,10 @@ class PosixSequentialFile final : public SequentialFile {
 
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
+
     while (true) {
       // zbc_pread
-      ::ssize_t read_size = zbc_pread(dev_, scratch, n >> 9, target_zone_->zbz_write_pointer);
+      ::ssize_t read_size = zbc_pread(dev_, scratch, n >> 9, target_zone_->zbz_start);
       if (read_size < 0) {  // Read error. 
         if (errno == EINTR) continue;  // Retry
         status = PosixError("PosixSequentialFile: zbc_pread failed.\n", errno);
@@ -344,27 +345,25 @@ class PosixWritableFile final : public WritableFile {
   Status WriteUnbuffered(const char* data, size_t size) {
     // Variables for zbc zones
     ssize_t ret;
-    ssize_t sector_count;
-    long long zone_ofst = 0;
-    long long sector_ofst;
+    ssize_t sector_count = 0;
 
-    while (size > 0) {
+    if (size > 0) {
       sector_count = size >> 9;
-      sector_ofst = zbc_zone_start(target_zone_) + zone_ofst;
+      
+      // data 의 size 가 512B 보다 작을 때, 한 block 내에서 write.
+      if (sector_count < 1) sector_count = 1;
 
-      ret = zbc_pwrite(dev_, (void *) data, sector_count, sector_ofst);
+      // sector offset 을 정해줌.
+      // 해당 zone 의 현재 wp 에 지정해주면 됨.
+      ret = zbc_pwrite(dev_, data, sector_count, target_zone_->zbz_write_pointer);
       if (ret < 0) {
         fprintf(stderr, "%s failed %zd (%s)\n", "zbc_pwrite", -ret, strerror(-ret));
         zbc_close(dev_);
         return PosixError(filename_, errno);
       }
 
-      // LOCK File 같이 빈 File 들은 ret = 0.
-      if (ret == 0) break;
-
-      zone_ofst += ret;
-      data += ret;
-      size -= ret;
+      // Check
+      printf("WriteUnbuffered : %llu, %s, %llu, %llu\n", ret, data, strlen(data), target_zone_->zbz_write_pointer);
     }
 
     return Status::OK();
@@ -607,6 +606,7 @@ class PosixEnv : public Env {
     if (map_table.find(filename) == map_table.end()) {
       FindZoneForFilename(dev, &target_zone);
       map_table[filename] = target_zone;
+      printf("File: \"%s\" , start: %llu\n", filename.c_str(), map_table[filename]->zbz_start);
     } else {
       // filename 사용하여 target_zone 가져 옴.
       target_zone = leveldb::map_table[filename];
@@ -727,7 +727,7 @@ class PosixEnv : public Env {
   bool FileExists(const std::string& filename) override {
     // map 에서 key 로 가지고 있는 filename 이라면 true return
     // 그것이 아니라면 false
-    return leveldb::map_table.find(filename) == leveldb::map_table.end();
+    return leveldb::map_table.find(filename) != leveldb::map_table.end();
   }
 
   Status GetChildren(const std::string& directory_path,
@@ -776,16 +776,74 @@ class PosixEnv : public Env {
   }
 
   Status CreateDir(const std::string& dirname) override {
-    // if (::mkdir(dirname.c_str(), 0755) != 0) {
-    //   return PosixError(dirname, errno);
-    // }
+    printf("CreateDir \"%s\"\n", dirname.c_str());
+    std::string path = "/dev/sda";
+
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+
+    // device open
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError("CreateDir: zbc_open", errno);
+    }
+
+    // 먼저, 해당 dirname 매핑된 zone 있는지 확인
+    // nullptr: 없으면, dirname 과 zone 매핑
+    // 있다면 그대로 해당 target_zone 사용하면 됨.
+    target_zone = leveldb::map_table[dirname];
+    if (target_zone == nullptr) {
+      ret = FindZoneForFilename(dev, &target_zone);
+      if (ret != 0) {
+        fprintf(stderr, "CreateDir: FindZoneForFilename failed\n");
+        return PosixError("CreateDir: FindZoneForFilename", errno);
+      }
+
+      // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
+      leveldb::map_table[dirname] = target_zone;
+    }
+
     return Status::OK();
   }
 
   Status RemoveDir(const std::string& dirname) override {
-    // if (::rmdir(dirname.c_str()) != 0) {
-    //   return PosixError(dirname, errno);
-    // }
+    printf("RemoveDir \"%s\"\n", dirname.c_str());
+    std::string path = "/dev/sda";
+
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+
+    // device open
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError("RemoveDir: zbc_open", errno);
+    }
+
+    // filename 과 매핑되어 있는 zone 가져 옴.
+    target_zone = leveldb::map_table[dirname];
+
+    // 제일 처음 시작할 때, 하위 디렉터리를 삭제하는 과정이 있음
+    // 그 때는 map_table 에 아무것도 없는 상황이기 때문에
+    // target_zone 이 유효하지 않음.
+    if (target_zone == nullptr) {
+      return Status::OK();
+    }
+
+    ret = zbc_reset_zone(dev, target_zone->zbz_start, 0);
+    if (ret == -EIO) {
+      fprintf(stderr, "RemoveDir: zbc_reset_zone failed\n");
+      zbc_close(dev);
+      return PosixError("RemoveDir: zbc_reset_zone", errno);
+    }
+
     return Status::OK();
   }
 
@@ -820,14 +878,37 @@ class PosixEnv : public Env {
   }
 
   Status RenameFile(const std::string& from, const std::string& to) override {
-    printf("RenameFile: \"%s\" to \"%s\" \n", from, to);
+    std::string path = "/dev/sda";
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *target_zone = nullptr;
 
-    struct zbc_zone *tmp_target_zone = map_table[from];
-    map_table[to] = tmp_target_zone;
+    printf("RenameFile: \"%s\" to \"%s\" \n", from.c_str(), to.c_str());
 
-    // to 를 key 로 사용하여 교체 해주었으면
-    // map_table 에서 from 제거
-    map_table.erase(from);
+    // device open
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError("RenameFile: zbc_open", errno);
+    }
+
+    // from 에 대해서 map_table 에 존재하지 않을 때.
+    // 그냥 바로 to 에 대해서 매핑 시켜주면 됨.
+    // from 이 존재 한다면, temp zone 생성 및 수정.
+    if (map_table.find(from) == map_table.end()) {
+      FindZoneForFilename(dev, &target_zone);
+    } else {
+      target_zone = map_table[from];
+      
+      // to 를 key 로 사용하여 교체 해주었으면
+      // map_table 에서 from 제거
+      map_table.erase(from);
+    }
+
+    map_table[to] = target_zone;
+    printf("RenameFile: target_zone %llu\n", map_table[to]->zbz_start);
 
     return Status::OK();
   }
@@ -846,7 +927,7 @@ class PosixEnv : public Env {
         fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
       else
         fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
-      return PosixError(path, errno);
+      return PosixError("LockFile: zbc_open", errno);
     }
 
     // 먼저, 해당 filename 매핑된 zone 있는지 확인
@@ -917,26 +998,43 @@ class PosixEnv : public Env {
 
     // The CreateDir status is ignored because the directory may already exist.
     // libzbc 사용 시 Dir 필요가 없으므로, CreateDir 수행하지 않도록 수정.
-    // CreateDir(*result);
+    CreateDir(*result);
 
     return Status::OK();
   }
 
   Status NewLogger(const std::string& filename, Logger** result) override {
-    int fd = ::open(filename.c_str(),
-                    O_APPEND | O_WRONLY | O_CREAT | kOpenBaseFlags, 0644);
-    if (fd < 0) {
-      *result = nullptr;
-      return PosixError(filename, errno);
+    std::string path = "/dev/sda";
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+
+    // Open ZBC Device
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+    if (ret != 0) {
+      if (ret == - ENODEV) 
+        fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
+      else
+        fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
+      return PosixError("NewLogger: zbc_open", errno);
     }
 
-    std::FILE* fp = ::fdopen(fd, "w");
-    if (fp == nullptr) {
-      ::close(fd);
+    // posix open 대신 map_table 에 매핑 진행
+    ret = FindZoneForFilename(dev, &target_zone);
+    if (ret != 0) {
+      fprintf(stderr, "NewLogger: FindZoneForFilename failed\n");
       *result = nullptr;
-      return PosixError(filename, errno);
+      return PosixError("NewLogger: FindZoneForFilename", errno);
+    }
+
+    printf("NewLogger: \"%s\", target_zone start: %llu\n", filename.c_str(), target_zone->zbz_start);
+
+    // target_zone 가져오지 못 하였을때.
+    if (target_zone == nullptr) {
+      zbc_close(dev);
+      *result = nullptr;
+      return PosixError("NewLogger: target_zone nullptr", errno);
     } else {
-      *result = new PosixLogger(fp);
+      *result = new PosixLogger(dev, target_zone);
       return Status::OK();
     }
   }

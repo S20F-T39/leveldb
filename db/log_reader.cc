@@ -56,6 +56,7 @@ bool Reader::SkipToInitialBlock() {
 bool Reader::ReadRecord(Slice* record, std::string* scratch) {
   if (last_record_offset_ < initial_offset_) {
     if (!SkipToInitialBlock()) {
+			fprintf(stderr, "skipToInitialBlock not ok\n");
       return false;
     }
   }
@@ -148,6 +149,7 @@ bool Reader::ReadRecord(Slice* record, std::string* scratch) {
           // treat it as a corruption, just ignore the entire logical record.
           scratch->clear();
         }
+		fprintf(stderr, "read record case kEof\n");
         return false;
 
       case kBadRecord:
@@ -170,6 +172,7 @@ bool Reader::ReadRecord(Slice* record, std::string* scratch) {
       }
     }
   }
+  fprintf(stderr, "read record return false\n");
   return false;
 }
 
@@ -198,6 +201,7 @@ unsigned int Reader::ReadPhysicalRecord(Slice* result) {
           buffer_.clear();
           ReportDrop(kBlockSize, status);
           eof_ = true;
+		  fprintf(stderr, "read not ok return kEof\n");
           return kEof;
         } else if (buffer_.size() < kBlockSize) {
           eof_ = true;
@@ -209,12 +213,19 @@ unsigned int Reader::ReadPhysicalRecord(Slice* result) {
         // middle of writing the header. Instead of considering this an error,
         // just report EOF.
         buffer_.clear();
+		fprintf(stderr, "eof return kEof\n");
         return kEof;
       }
     }
 
     // Parse the header
     const char* header = buffer_.data();
+	fprintf(stderr, "header : ");
+	fprintf(stderr,buffer_.ToString().c_str());
+	fprintf(stderr,"\n");
+	fprintf(stderr,"header data : ");
+	fprintf(stderr,header);
+	fprintf(stderr,"\n");
     const uint32_t a = static_cast<uint32_t>(header[4]) & 0xff;
     const uint32_t b = static_cast<uint32_t>(header[5]) & 0xff;
     const unsigned int type = header[6];
@@ -229,6 +240,7 @@ unsigned int Reader::ReadPhysicalRecord(Slice* result) {
       // If the end of the file has been reached without reading |length| bytes
       // of payload, assume the writer died in the middle of writing the record.
       // Don't report a corruption.
+	  fprintf(stderr, "eof without reading return kEof\n");
       return kEof;
     }
 
