@@ -180,13 +180,16 @@ class PosixRandomAccessFile final : public RandomAccessFile {
 
     while (true) {
       // zbc_pread
+      // sector_count 를 n >> 9 로 지정.
+      // 여기서, n >> 9 가 1 보다 작다는 의미는 n 이 512 보다 적다는 의미.
+      // 그렇다면, sector_count 가 1이 되도록 guarantee.
       ssize_t sector_count = n >> 9;
       if (sector_count < 1) {
         sector_count = 1;
       }
 
-      // target_zone 의 start 에서 offset 더한 곳
-      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start + offset);
+      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
+
       if (read_size < 0) {  // Read error. 
         if (errno == EINTR) continue;  // Retry
         status = PosixError("PosixRandomAccessFile: zbc_pread failed.\n", errno);
