@@ -25,6 +25,7 @@ Status BlockHandle::DecodeFrom(Slice* input) {
     return Status::OK();
   } else {
     return Status::Corruption("bad block handle");
+	//return Status::OK();
   }
 }
 

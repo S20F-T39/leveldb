@@ -46,11 +46,16 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   Slice footer_input;
   Status s = file->Read(size - Footer::kEncodedLength, Footer::kEncodedLength,
                         &footer_input, footer_space);
-  if (!s.ok()) return s;
+  if (!s.ok()) {
+		fprintf(stderr, "Table Open file read Error!\n");
+		  return s;
+  }
 
   Footer footer;
   s = footer.DecodeFrom(&footer_input);
-  if (!s.ok()) return s;
+  if (!s.ok()) {
+			fprintf(stderr, "Table open decode Erroe!\n");
+		  return s;}
 
   // Read the index block
   BlockContents index_block_contents;
@@ -117,6 +122,8 @@ void Table::ReadFilter(const Slice& filter_handle_value) {
 
   // We might want to unify with ReadBlock() if we start
   // requiring checksum verification in Table::Open.
+
+
   ReadOptions opt;
   if (rep_->options.paranoid_checks) {
     opt.verify_checksums = true;
@@ -266,6 +273,4 @@ uint64_t Table::ApproximateOffsetOf(const Slice& key) const {
   }
   delete index_iter;
   return result;
-}
-
-}  // namespace leveldb
+}}
