@@ -188,6 +188,13 @@ class PosixRandomAccessFile final : public RandomAccessFile {
         sector_count = 1;
       }
 
+      unsigned long long start_sector = target_zone_->zbz_start;
+      
+      // offset 이 512B 보다 클 때, offset 을 512 만큼 나눠준 만큼, 섹터를 옮김.
+      if (offset >> 9 > 0) {
+        start_sector = target_zone_->zbz_start + (offset >> 9);
+      }
+
       ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
 
       if (read_size < 0) {  // Read error. 
@@ -553,6 +560,10 @@ class PosixEnv : public Env {
       return PosixError("NewSequentialFile: zbc_open", errno);
     }
 
+    if (map_table[filename] == nullptr) {
+      printf("target_zone is nullptr\n");
+    }
+
     target_zone = map_table[filename];
 
     *result = new PosixSequentialFile(dev, target_zone);
@@ -635,6 +646,8 @@ class PosixEnv : public Env {
     // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
     leveldb::map_table[current_file_name] = target_zone;
     zbc_open_zone(dev, map_table[current_file_name]->zbz_start, 0);
+
+    printf("Writable Filename: \"%s\" in %llu\n", current_file_name.c_str(), map_table[current_file_name]->zbz_start);
 
     *result = new PosixWritableFile(dev, target_zone, current_file_name);
 

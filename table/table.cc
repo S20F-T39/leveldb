@@ -54,8 +54,9 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   Footer footer;
   s = footer.DecodeFrom(&footer_input);
   if (!s.ok()) {
-			fprintf(stderr, "Table open decode Erroe!\n");
-		  return s;}
+		fprintf(stderr, "Table open decode Erroe!\n");
+	  return s;
+  }
 
   // Read the index block
   BlockContents index_block_contents;
