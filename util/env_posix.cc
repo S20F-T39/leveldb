@@ -129,8 +129,12 @@ class PosixSequentialFile final : public SequentialFile {
     Status status;
 
     while (true) {
+      ssize_t sector_count = n >> 9;
+      if (sector_count < 1) {
+        sector_count = 1;
+      }
       // zbc_pread
-      ::ssize_t read_size = zbc_pread(dev_, scratch, n >> 9, target_zone_->zbz_start);
+      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
       if (read_size < 0) {  // Read error. 
         if (errno == EINTR) continue;  // Retry
         status = PosixError("PosixSequentialFile: zbc_pread failed.\n", errno);
@@ -176,12 +180,19 @@ class PosixRandomAccessFile final : public RandomAccessFile {
 
     while (true) {
       // zbc_pread
-      ::ssize_t read_size = zbc_pread(dev_, scratch, n >> 9, offset);
+      ssize_t sector_count = n >> 9;
+      if (sector_count < 1) {
+        sector_count = 1;
+      }
+
+      // target_zone 의 start 에서 offset 더한 곳
+      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start + offset);
       if (read_size < 0) {  // Read error. 
         if (errno == EINTR) continue;  // Retry
         status = PosixError("PosixRandomAccessFile: zbc_pread failed.\n", errno);
         break;
       }
+      printf("RandomAccess: \"%s\"\n", scratch);
       *result = Slice(scratch, read_size);
       break;
     }
@@ -562,7 +573,7 @@ class PosixEnv : public Env {
         fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
       else 
         fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
-      return PosixError("NewSequentialFile: zbc_open", errno);
+      return PosixError("NewRandomAccessFile: zbc_open", errno);
     }
 
     target_zone = map_table[filename];

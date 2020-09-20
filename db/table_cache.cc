@@ -51,6 +51,7 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
     Table* table = nullptr;
     s = env_->NewRandomAccessFile(fname, &file);
     if (!s.ok()) {
+		fprintf(stderr,"FindTable NewRandomAccessFile Error!\n");
       std::string old_fname = SSTTableFileName(dbname_, file_number);
       if (env_->NewRandomAccessFile(old_fname, &file).ok()) {
         s = Status::OK();
@@ -59,6 +60,9 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
     if (s.ok()) {
       s = Table::Open(options_, file, file_size, &table);
     }
+	if(!s.ok()){
+		fprintf(stderr,"Table Open Error!\n");
+	}
 
     if (!s.ok()) {
       assert(table == nullptr);
