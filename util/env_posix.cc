@@ -119,26 +119,26 @@ class PosixSequentialFile final : public SequentialFile {
       : dev_(dev),
         target_zone_(target_zone) {}
 
-  ~PosixSequentialFile() override {
-    printf("PosixSequentialFile Destroyed...\n");
-    zbc_close(dev_);
-  }
+  ~PosixSequentialFile() override {}
 
   Status Read(size_t n, Slice* result, char* scratch) override {
     Status status;
 
     while (true) {
+      // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
       ssize_t sector_count = n >> 9;
-      if (sector_count < 1) {
-        sector_count = 1;
-      }
-      // zbc_pread
+      if (sector_count < 1) sector_count = 1;
+
+      // zbc_pread: 해당 zone 시작부터 sequential 하게 읽어와 scratch 에 넣어줌.
       ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
       if (read_size < 0) {  // Read error. 
         if (errno == EINTR) continue;  // Retry
         status = PosixError("PosixSequentialFile: zbc_pread failed.\n", errno);
         break;
       }
+	  fprintf(stderr, "scratch : ");
+	  fprintf(stderr, scratch);
+	  fprintf(stderr, "\n");
       *result = Slice(scratch, read_size);
       break;
     }
@@ -168,45 +168,39 @@ class PosixRandomAccessFile final : public RandomAccessFile {
       : dev_(dev),
         target_zone_(target_zone) {}
 
-  ~PosixRandomAccessFile() override {
-    zbc_close(dev_);
-  }
+  ~PosixRandomAccessFile() override {}
 
-  Status Read(uint64_t offset, size_t n, Slice* result,
-              char* scratch) const override {
+  // RandomAccessFile -> offset 이 오면, 해당 offset 부터 읽기 시작.
+  Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const override {
+    uint64_t sector_start;
+    uint64_t sector_offset;
 
-    Status status;
-
-    while (true) {
-      // zbc_pread
-      // sector_count 를 n >> 9 로 지정.
-      // 여기서, n >> 9 가 1 보다 작다는 의미는 n 이 512 보다 적다는 의미.
-      // 그렇다면, sector_count 가 1이 되도록 guarantee.
-      ssize_t sector_count = n >> 9;
-      if (sector_count < 1) {
-        sector_count = 1;
-      }
-
-      unsigned long long start_sector = target_zone_->zbz_start;
-      
-      // offset 이 512B 보다 클 때, offset 을 512 만큼 나눠준 만큼, 섹터를 옮김.
-      if (offset >> 9 > 0) {
-        start_sector = target_zone_->zbz_start + (offset >> 9);
-      }
-
-      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, start_sector);
-
-      if (read_size < 0) {  // Read error. 
-        if (errno == EINTR) continue;  // Retry
-        status = PosixError("PosixRandomAccessFile: zbc_pread failed.\n", errno);
-        break;
-      }
-      printf("RandomAccess: \"%s\"\n", scratch);
-      *result = Slice(scratch, read_size);
-      break;
+    // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
+    size_t sector_count = n >> 9;
+    if (sector_count < 1) {
+      sector_count = 1;
     }
 
-    return status;
+    // 읽기 시작할 sector 의 출발점을 target_zone 의 첫번째로 설정.
+    // offset 이 512B 보다 크다면, 데이터를 중간부터 읽는다는 의미.
+    // 512B 나눈만큼 섹터를 옮긴다.
+    sector_offset = (offset >> 9) >> 9;
+    sector_start = target_zone_->zbz_start;
+
+    // if (sector_offset > 0) sector_start += sector_offset;
+
+    char* tmp_buf[28672];
+
+    ssize_t read_size = zbc_pread(dev_, tmp_buf, 56, sector_start);
+    if (read_size < 0) {
+      return PosixError("PosixRandomAccessFile::Read Failed", errno);
+    }
+
+    printf("RandomAccessFile: \"%s\", %llu, %llu, %llu\n", 
+    tmp_buf, read_size, sector_start, sector_offset);
+    *result = Slice(scratch, read_size);
+
+    return Status::OK();
   }
 
  private:
@@ -303,9 +297,6 @@ class PosixWritableFile final : public WritableFile {
 
   Status Close() override {
     Status status = FlushBuffer();
-
-    zbc_close(dev_);
-
     return status;
   }
 
@@ -339,23 +330,19 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status WriteUnbuffered(const char* data, size_t size) {
-    // Variables for zbc zones
-    ssize_t ret;
-    ssize_t sector_count = 0;
+    unsigned long long sector_start;
 
-    if (size > 0) {
-      sector_count = size >> 9;
-      // data 의 size 가 512B 보다 작을 때, 한 block 내에서 write.
-      if (sector_count < 1) sector_count = 1;
+    // Write 하려는 size 가 512B 보다 작을 때, sector 1 보장.
+    ssize_t sector_count = size >> 9;
+    if (sector_count < 1) sector_count = 1;
 
-      // sector offset 을 정해줌.
-      // 해당 zone 의 현재 wp 에 지정해주면 됨.
-      ret = zbc_pwrite(dev_, data, sector_count, target_zone_->zbz_write_pointer);
-      if (ret < 0) {
-        fprintf(stderr, "%s failed %zd (%s)\n", "zbc_pwrite", -ret, strerror(-ret));
-        zbc_close(dev_);
-        return PosixError(filename_, errno);
-      }
+    // 쓰기 시작할 sector_start 에 대해서 정해 줌.
+    // 해당 target_zone 의 wp 부터 순차적으로 write
+    sector_start = target_zone_->zbz_write_pointer;
+
+    ssize_t write_result = zbc_pwrite(dev_, data, sector_count, sector_start);
+    if (write_result < 0) {
+      return PosixError("PosixWritableFile::WriteUnbuffered Failed", errno);
     }
 
     return Status::OK();
@@ -514,36 +501,27 @@ class PosixEnv : public Env {
   ssize_t FindZoneForFilename(zbc_device *dev, zbc_zone **target_zone) {
     ssize_t ret;
     struct zbc_zone *result_zones = nullptr;
+    struct zbc_zone *imp_open_zones = nullptr;
     unsigned int nr_result_zones;
+    unsigned int nr_imp_open_zones;
 
     // 1. Empty Zone 가져 옴.
-    // target_zone 가져가면 해당 target_zone explicit_open 상태로 변경됨.
     ret = zbc_list_zones(dev, 0, ZBC_RO_EMPTY, &result_zones, &nr_result_zones);
     if (ret != 0) {
       fprintf(stderr, "FindZoneForFilename: zbc_list_zones(EMPTY) failed\n");
       return ret;
     }
 
-    // Empty Zone 있다면 target_zone 첫번째 Empty Zone
-    // Empty Zone 없다면 일단 전부 Reset 후 첫번째 Zone 준다.
+    // Empty Zone 있다면 target_zone = 첫번째 Empty Zone
     if (nr_result_zones != 0) {
       *target_zone = &result_zones[0];
-    } else {
-      zbc_reset_zone(dev, 0, ZBC_OP_ALL_ZONES);
-      ret = zbc_list_zones(dev, 0, ZBC_RO_EMPTY, &result_zones, &nr_result_zones);
-      if (ret != 0) {
-        fprintf(stderr, "FindZoneForFilename: zbc_list_zones(EMPTY) failed\n");
-        return ret;
-      }
-      *target_zone = &result_zones[0];
+      return ret;
     }
-
+    
     return ret;
   }
 
-  Status NewSequentialFile(const std::string& filename,
-                           SequentialFile** result) override {
-    
+  Status NewSequentialFile(const std::string& filename, SequentialFile** result) override {
     std::string path = "/dev/sda";
 
     struct zbc_device *dev = nullptr;
@@ -559,21 +537,17 @@ class PosixEnv : public Env {
       return PosixError("NewSequentialFile: zbc_open", errno);
     }
 
-    if (map_table[filename] == nullptr) {
-      printf("target_zone is nullptr\n");
-    }
-
     target_zone = map_table[filename];
+
+    printf("NewSequentialFile: \"%s\" in %llu\n", 
+    filename.c_str(), target_zone->zbz_start);
 
     *result = new PosixSequentialFile(dev, target_zone);
 
     return Status::OK();
   }
 
-  Status NewRandomAccessFile(const std::string& filename,
-                             RandomAccessFile** result) override {
-    *result = nullptr;
-
+  Status NewRandomAccessFile(const std::string& filename, RandomAccessFile** result) override {
     std::string path = "/dev/sda";
 
     struct zbc_device *dev = nullptr;
@@ -591,13 +565,15 @@ class PosixEnv : public Env {
 
     target_zone = map_table[filename];
 
+    printf("NewRandomAccessFile: \"%s\" in %llu\n", 
+    filename.c_str(), target_zone->zbz_start);
+
     *result = new PosixRandomAccessFile(dev, target_zone);
 
     return Status::OK();
   }
 
-  Status NewWritableFile(const std::string& filename,
-                         WritableFile** result) override {
+  Status NewWritableFile(const std::string& filename, WritableFile** result) override {
     std::string path = "/dev/sda";
 
     struct zbc_device *dev = nullptr;
@@ -616,25 +592,16 @@ class PosixEnv : public Env {
     std::string current_file_name;
 
     // dbtmp File 에 대해서.
-    if (filename.find("dbtmp", 0) != std::string::npos) {
+    if (filename.find("dbtmp", 0) != std::string::npos)
       current_file_name = "/tmp/leveldbtest-0/dbbench/CURRENT";
-      // CURRENT File 있으면, 지우고 다시 받아와야 함. (다른 File 이므로)
-      if (map_table.find(current_file_name) != map_table.end()) {
-        target_zone = map_table[current_file_name];
-        zbc_reset_zone(dev, target_zone->zbz_start, 0);
-        map_table.erase(current_file_name);
-      }
-    } else {
-      current_file_name = filename;
-      // 먼저, 해당 filename 매핑된 zone 있는지 확인
-      // filename 해당되는 zone 있을 때.
-      // 다른 file 이므로 reset 후 다시 진행 해야함.
-      if (map_table.find(current_file_name) != map_table.end()) {
-        target_zone = map_table[current_file_name];
-        zbc_reset_zone(dev, target_zone->zbz_start, 0);
-        map_table.erase(current_file_name);
-      } 
-    }
+    else current_file_name = filename;
+    
+    if (map_table.find(current_file_name) != map_table.end()) {
+      target_zone = map_table[current_file_name];
+      zbc_reset_zone(dev, target_zone->zbz_start, 0);
+      free(map_table[current_file_name]);
+      map_table.erase(current_file_name);
+    } 
 
     ret = FindZoneForFilename(dev, &target_zone);
     if (ret != 0) {
@@ -644,17 +611,17 @@ class PosixEnv : public Env {
 
     // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
     leveldb::map_table[current_file_name] = target_zone;
-    zbc_open_zone(dev, map_table[current_file_name]->zbz_start, 0);
+    zbc_open_zone(dev, target_zone->zbz_start, 0);
 
-    printf("Writable Filename: \"%s\" in %llu\n", current_file_name.c_str(), map_table[current_file_name]->zbz_start);
+    printf("NewWritableFile: \"%s\" in %llu\n", 
+    current_file_name.c_str(), map_table[current_file_name]->zbz_start);
 
     *result = new PosixWritableFile(dev, target_zone, current_file_name);
 
     return Status::OK();
   }
 
-  Status NewAppendableFile(const std::string& filename,
-                           WritableFile** result) override {
+  Status NewAppendableFile(const std::string& filename, WritableFile** result) override {
     std::string path = "/dev/sda";
     
     struct zbc_device *dev = nullptr;
@@ -667,25 +634,37 @@ class PosixEnv : public Env {
         fprintf(stderr, "Open %s failed (not a zoned block device)\n", path.c_str());
       else
         fprintf(stderr, "Open %s failed (%s)\n", path.c_str(), strerror(-ret));
-      return PosixError(path, errno);
+      return PosixError("NewAppendableFile: zbc_open", errno);
     }
 
-    // 먼저, 해당 filename 매핑된 zone 있는지 확인
-    // nullptr: 없으면, filename 과 zone 매핑
-    // 있다면 그대로 해당 target_zone 사용하면 됨.
-    target_zone = leveldb::map_table[filename];
-    if (target_zone == nullptr) {
-      ret = FindZoneForFilename(dev, &target_zone);
-      if (ret != 0) {
-        fprintf(stderr, "NewAppendableFile: FindZoneForFilename failed\n");
-        return PosixError("NewAppendableFile: FindZoneForFilename", errno);
-      }
+    std::string current_file_name;
 
-      // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
-      leveldb::map_table[filename] = target_zone;
+    // dbtmp File 에 대해서.
+    if (filename.find("dbtmp", 0) != std::string::npos)
+      current_file_name = "/tmp/leveldbtest-0/dbbench/CURRENT";
+    else current_file_name = filename;
+    
+    if (map_table.find(current_file_name) != map_table.end()) {
+      target_zone = map_table[current_file_name];
+      zbc_reset_zone(dev, target_zone->zbz_start, 0);
+      free(map_table[current_file_name]);
+      map_table.erase(current_file_name);
+    } 
+
+    ret = FindZoneForFilename(dev, &target_zone);
+    if (ret != 0) {
+      fprintf(stderr, "NewAppendableFile: FindZoneForFilename failed\n");
+      return PosixError("NewAppendableFile: FindZoneForFilename", errno);
     }
 
-    *result = new PosixWritableFile(dev, target_zone, filename);
+    // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
+    leveldb::map_table[current_file_name] = target_zone;
+    zbc_open_zone(dev, target_zone->zbz_start, 0);
+
+    printf("NewAppendableFile: \"%s\" in %llu\n", 
+    current_file_name.c_str(), map_table[current_file_name]->zbz_start);
+
+    *result = new PosixWritableFile(dev, target_zone, current_file_name);
 
     return Status::OK();
   }
@@ -703,41 +682,91 @@ class PosixEnv : public Env {
   }
 
   Status RemoveFile(const std::string& filename) override {
+    std::string path = "/dev/sda";
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+
+    // Device Open
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+
+    // 해당 filename 과 mapping 된 target_zone 받아옴.
+    target_zone = map_table[filename];
+
+    // 해당 target_zone reset
+    zbc_reset_zone(dev, target_zone->zbz_start, 0);
+
+    // zone reset 후, mapping_table 에서도 지워줘야 함.
+    free(map_table[filename]);
+    map_table.erase(filename);
+
+    printf("RemoveFile \"%s\"\n", filename.c_str());
+
     return Status::OK();
   }
 
   Status CreateDir(const std::string& dirname) override {
+    std::string path = "/dev/sda";
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+
+    // Device Open
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+
+    // 해당 dirname 과 mapping 시켜 줄 target_zone 받아와서, 매핑.
+    FindZoneForFilename(dev, &target_zone);
+    map_table[dirname] = target_zone;
+
     return Status::OK();
   }
 
   Status RemoveDir(const std::string& dirname) override {
+    std::string path = "/dev/sda";
+    struct zbc_device *dev = nullptr;
+    struct zbc_zone *target_zone = nullptr;
+
+    // Device Open
+    ssize_t ret = zbc_open(path.c_str(), O_RDWR, &dev);
+
+    // 해당 dirname 과 mapping 된 target_zone 받아옴.
+    target_zone = map_table[dirname];
+
+    // 첫 시작과 함께 하위 디렉터리 삭제하기 때문에,
+    // filename 과 매핑된 zone 없음. 모든 zone reset
+    if (target_zone == nullptr) {
+      zbc_reset_zone(dev, 0, ZBC_OP_ALL_ZONES);
+      return Status::OK();
+    }
+
+    // 해당 target_zone reset
+    zbc_reset_zone(dev, target_zone->zbz_start, 0);
+
+    // zone reset 후, mapping_table 에서도 지워줘야 함.
+    free(map_table[dirname]);
+    map_table.erase(dirname);
+
     return Status::OK();
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
-    std::string path = "/dev/sda";
-
-    struct zbc_device *dev = nullptr;
     struct zbc_zone *target_zone = nullptr;
 
-    unsigned long long zone_ofst;
-    unsigned long long zone_start;
+    uint64_t zone_ofst;
+    uint64_t zone_start;
 
     // filename 과 매핑 된 zone 의 현재 wp 받아오면
     // file 이 들어있는 block 크기 받을 수 있음.
     target_zone = leveldb::map_table[filename];
     if (target_zone == nullptr) {
-      zbc_close(dev);
       *size = 0;
       return PosixError("GetFileSize: no target zone for " + filename, errno);
     } 
 
     // 먼저, 해당 target_zone 의 현재 wp 와, start 구함.
     // 그 후, size 를 wp - start 로, 512B 단위로 얼마나 쓰여졌는지 구함.
-    zone_ofst = zbc_zone_wp(target_zone);
-    zone_start = zbc_zone_start(target_zone);
+    zone_ofst = target_zone->zbz_write_pointer;
+    zone_start = target_zone->zbz_start;
     
-    *size = zone_ofst - zone_start;
+    *size = (zone_ofst - zone_start) << 9;
 
     return Status::OK();
   }
@@ -763,31 +792,16 @@ class PosixEnv : public Env {
       return PosixError("LockFile: zbc_open", errno);
     }
 
-    // 먼저, 해당 filename 매핑된 zone 있는지 확인
-    // nullptr: 없으면, filename 과 zone 매핑
-    // 있다면 그대로 해당 target_zone 사용하면 됨.
-    target_zone = leveldb::map_table[filename];
-    if (target_zone == nullptr) {
-      ret = FindZoneForFilename(dev, &target_zone);
-      if (ret != 0) {
-        fprintf(stderr, "NewAppendableFile: FindZoneForFilename failed\n");
-        return PosixError("NewAppendableFile: FindZoneForFilename", errno);
-      }
-
-      // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
-      leveldb::map_table[filename] = target_zone;
-    }
+    FindZoneForFilename(dev, &target_zone);
+    map_table[filename] = target_zone;
 
     if (!locks_.Insert(filename)) {
-      // ZBC Device Close.
-      zbc_close(dev);
       return Status::IOError("lock " + filename, "already held by process");
     }
 
     if (LockOrUnlock(ret, true) == -1) {
       // ZBC Device Close.
       int lock_errno = errno;
-      zbc_close(dev);
       locks_.Remove(filename);
       return PosixError("lock " + filename, lock_errno);
     }
@@ -803,8 +817,6 @@ class PosixEnv : public Env {
       return PosixError("unlock " + posix_file_lock->filename(), errno);
     }
     locks_.Remove(posix_file_lock->filename());
-    // ZBC Device Close.
-    zbc_close(posix_file_lock->dev());
     delete posix_file_lock;
     return Status::OK();
   }
@@ -852,26 +864,11 @@ class PosixEnv : public Env {
     }
 
     // posix open 대신 map_table 에 매핑 진행
-    ret = FindZoneForFilename(dev, &target_zone);
-    if (ret != 0) {
-      fprintf(stderr, "NewLogger: FindZoneForFilename failed\n");
-      *result = nullptr;
-      return PosixError("NewLogger: FindZoneForFilename", errno);
-    }
-
+    FindZoneForFilename(dev, &target_zone);
     map_table[filename] = target_zone;
 
-    printf("NewLogger: \"%s\", target_zone start: %llu\n", filename.c_str(), target_zone->zbz_start);
-
-    // target_zone 가져오지 못 하였을때.
-    if (target_zone == nullptr) {
-      zbc_close(dev);
-      *result = nullptr;
-      return PosixError("NewLogger: target_zone nullptr", errno);
-    } else {
-      *result = new PosixLogger(dev, target_zone);
-      return Status::OK();
-    }
+    *result = new PosixLogger(dev, target_zone);
+    return Status::OK();
   }
 
   uint64_t NowMicros() override {
