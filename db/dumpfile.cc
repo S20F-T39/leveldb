@@ -149,6 +149,7 @@ Status DumpTable(Env* env, const std::string& fname, WritableFile* dst) {
   RandomAccessFile* file = nullptr;
   Table* table = nullptr;
   Status s = env->GetFileSize(fname, &file_size);
+  printf("DumpTable: \"%s\"\n", fname);
   if (s.ok()) {
     s = env->NewRandomAccessFile(fname, &file);
   }

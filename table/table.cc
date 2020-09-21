@@ -44,15 +44,19 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
 
   char footer_space[Footer::kEncodedLength];
   Slice footer_input;
+  fprintf(stderr, "test1\n");
   Status s = file->Read(size - Footer::kEncodedLength, Footer::kEncodedLength,
                         &footer_input, footer_space);
+  fprintf(stderr,"test2\n");
   if (!s.ok()) {
 		fprintf(stderr, "Table Open file read Error!\n");
 		  return s;
   }
 
   Footer footer;
+  fprintf(stderr,"test3\n");
   s = footer.DecodeFrom(&footer_input);
+  fprintf(stderr,"test4\n");
   if (!s.ok()) {
 		fprintf(stderr, "Table open decode Erroe!\n");
 	  return s;
@@ -64,12 +68,15 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   if (options.paranoid_checks) {
     opt.verify_checksums = true;
   }
+  fprintf(stderr, "test5\n");
   s = ReadBlock(file, opt, footer.index_handle(), &index_block_contents);
-
+  fprintf(stderr, "test6\n");
   if (s.ok()) {
     // We've successfully read the footer and the index block: we're
     // ready to serve requests.
+	fprintf(stderr, "test7\n");
     Block* index_block = new Block(index_block_contents);
+	fprintf(stderr, "test8\n");
     Rep* rep = new Table::Rep;
     rep->options = options;
     rep->file = file;
@@ -80,6 +87,9 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     rep->filter = nullptr;
     *table = new Table(rep);
     (*table)->ReadMeta(footer);
+  }
+  else{
+  	fprintf(stderr,"ReadBlock not ok\n");
   }
 
   return s;
