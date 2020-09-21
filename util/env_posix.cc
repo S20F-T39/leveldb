@@ -45,7 +45,6 @@ namespace {
 
 //Zone Mapping Table
 std::map<std::string, struct zbc_zone*> map_table;
-int current_zone_number;
 
 // Set by EnvPosixTestHelper::SetReadOnlyMMapLimit() and MaxOpenFiles().
 int g_open_read_only_file_limit = -1;
@@ -195,7 +194,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
         start_sector = target_zone_->zbz_start + (offset >> 9);
       }
 
-      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
+      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, start_sector);
 
       if (read_size < 0) {  // Read error. 
         if (errno == EINTR) continue;  // Retry

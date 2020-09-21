@@ -47,14 +47,18 @@ Status Footer::DecodeFrom(Slice* input) {
   const uint64_t magic = ((static_cast<uint64_t>(magic_hi) << 32) |
                           (static_cast<uint64_t>(magic_lo)));
   if (magic != kTableMagicNumber) {
+	fprintf(stderr,"not an sstable\n");
     return Status::Corruption("not an sstable (bad magic number)");
+	//return Status::OK();
   }
 
   Status result = metaindex_handle_.DecodeFrom(input);
   if (result.ok()) {
+	fprintf(stderr,"metaindex decodeFrom ok\n");
     result = index_handle_.DecodeFrom(input);
   }
   if (result.ok()) {
+	fprintf(stderr, "index decode from ok\n");
     // We skip over any leftover data (just padding for now) in "input"
     const char* end = magic_ptr + 8;
     *input = Slice(end, input->data() + input->size() - end);
