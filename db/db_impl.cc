@@ -198,13 +198,11 @@ Status DBImpl::NewDB() {
     new_db.EncodeTo(&record);
     s = log.AddRecord(record);
     if (s.ok()) {
-      printf("DBImpl::NewDB LogFile AddRecord ok\n");
       s = file->Close();
     }
   }
   delete file;
   if (s.ok()) {
-		printf("DBImpl::NewDB File Close ok.\n");
     // Make "CURRENT" file that points to the new manifest file.
     s = SetCurrentFile(env_, dbname_, 1);
   } else {
@@ -305,18 +303,15 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   }
 
   if (!env_->FileExists(CurrentFileName(dbname_))) {
-    printf("DBImpl::Recover \"%s\" not exists.\n", dbname_.c_str());
     if (options_.create_if_missing) {
       s = NewDB();
       if (!s.ok()) {
-			  printf("DBImpl::Recover NewDB is not ok.\n");
         return s;
       }
     } else {
       return Status::InvalidArgument(dbname_, "does not exist (create_if_missing is false)");
     }
   } else {
-    printf("DBImpl::Recover \"%s\" exists.\n", dbname_.c_str());
     if (options_.error_if_exists) {
       return Status::InvalidArgument(dbname_, "exists (error_if_exists is true)");
     }
@@ -324,7 +319,6 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
 
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
-		printf("DBImpl::Recover versions_->Recover not ok.\n");
     return s;
   }
   SequenceNumber max_sequence(0);
@@ -1517,7 +1511,6 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
     s = options.env->NewWritableFile(LogFileName(dbname, new_log_number), &lfile);
 
     if (s.ok()) {
-	    printf("NewWritableFile (LogFile) Complete\n");
       edit.SetLogNumber(new_log_number);
       impl->logfile_ = lfile;
       impl->logfile_number_ = new_log_number;
