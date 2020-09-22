@@ -39,6 +39,8 @@
 
 #include <libzbc/zbc.h>
 
+#define MAX_ZBC_BUFFER_SIZE 8388608
+
 namespace leveldb {
 
 namespace {
@@ -122,28 +124,20 @@ class PosixSequentialFile final : public SequentialFile {
   ~PosixSequentialFile() override {}
 
   Status Read(size_t n, Slice* result, char* scratch) override {
-    Status status;
+    // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
+    ssize_t sector_count = n >> 9;
+    if (sector_count < 1) sector_count = 1;
 
-    while (true) {
-      // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
-      ssize_t sector_count = n >> 9;
-      if (sector_count < 1) sector_count = 1;
-
-      // zbc_pread: 해당 zone 시작부터 sequential 하게 읽어와 scratch 에 넣어줌.
-      ::ssize_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
-      if (read_size < 0) {  // Read error. 
-        if (errno == EINTR) continue;  // Retry
-        status = PosixError("PosixSequentialFile: zbc_pread failed.\n", errno);
-        break;
-      }
-	  fprintf(stderr, "scratch : ");
-	  fprintf(stderr, scratch);
-	  fprintf(stderr, "\n");
-      *result = Slice(scratch, read_size);
-      break;
+    // zbc_pread: 해당 zone 시작부터 sequential 하게 읽어와 scratch 에 넣어줌.
+    size_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
+    if (read_size < 0) {  // Read error. 
+      return PosixError("PosixSequentialFile: zbc_pread failed.\n", errno);
     }
 
-    return status;
+    printf("Read: \"%s\" read_size %llu\n", scratch, strlen(scratch));
+    
+    *result = Slice(scratch, strlen(scratch));
+    return Status::OK();
   }
 
   Status Skip(uint64_t n) override {
@@ -198,7 +192,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
 
     printf("RandomAccessFile: \"%s\", %llu, %llu, %llu\n", 
     tmp_buf, read_size, sector_start, sector_offset);
-    *result = Slice(scratch, read_size);
+    *result = Slice(scratch, read_size << 9);
 
     return Status::OK();
   }
@@ -330,17 +324,25 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status WriteUnbuffered(const char* data, size_t size) {
-    unsigned long long sector_start;
+    std::string tmp;
 
-    // Write 하려는 size 가 512B 보다 작을 때, sector 1 보장.
-    ssize_t sector_count = size >> 9;
-    if (sector_count < 1) sector_count = 1;
+    uint64_t sector_start;
+    size_t sector_count;
 
+    if (size == 0) sector_count = 0;
+    else {
+      if (size >> 9 < 1) sector_count = 1;
+      else sector_count = size >> 9;
+    }
+    
     // 쓰기 시작할 sector_start 에 대해서 정해 줌.
     // 해당 target_zone 의 wp 부터 순차적으로 write
     sector_start = target_zone_->zbz_write_pointer;
 
-    ssize_t write_result = zbc_pwrite(dev_, data, sector_count, sector_start);
+    tmp = data;
+    tmp.resize(size);
+
+    ssize_t write_result = zbc_pwrite(dev_, tmp.c_str(), sector_count, sector_start);
     if (write_result < 0) {
       return PosixError("PosixWritableFile::WriteUnbuffered Failed", errno);
     }
@@ -766,7 +768,7 @@ class PosixEnv : public Env {
     zone_ofst = target_zone->zbz_write_pointer;
     zone_start = target_zone->zbz_start;
     
-    *size = (zone_ofst - zone_start) << 9;
+    *size = (zone_ofst - zone_start);
 
     return Status::OK();
   }

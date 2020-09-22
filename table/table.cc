@@ -42,6 +42,8 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     return Status::Corruption("file is too short to be an sstable");
   }
 
+  printf("Table::Open size %llu\n", size);
+
   char footer_space[Footer::kEncodedLength];
   Slice footer_input;
   fprintf(stderr, "test1\n");
