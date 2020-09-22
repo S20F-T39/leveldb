@@ -186,7 +186,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
       sector_count = 1;
     }
 
-    void *tmp_buffer = nullptr;
+    char *tmp_buffer = nullptr;
     size_t ret = posix_memalign((void **) &tmp_buffer, sysconf(_SC_PAGESIZE), file_size);
     if (ret != 0) {
       fprintf(stderr, "No memory for I/O buffer (%zu B)\n", file_size);
@@ -194,17 +194,12 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
     memset(tmp_buffer, 0, file_size);
 
-    // 쓰는게 없어서 읽는 것도 0...
-    // 뭘 어떻게 읽어도 답이 없다.
-    size_t read_size = zbc_pread(dev_, (char *) tmp_buffer, target_zone_->zbz_length, target_zone_->zbz_start);
+    size_t read_size = zbc_pread(dev_, tmp_buffer, target_zone_->zbz_length, target_zone_->zbz_start);
     if (read_size < 0) {
       return PosixError("PosixRandomAccessFile::Read Failed", errno);
     }
 
-    /* Read Result Control here */
-    // 실패.....................
-    
-    *result = Slice(scratch, n);
+    *result = Slice(scratch, 1); // Test 용
 
     return Status::OK();
   }
@@ -356,7 +351,7 @@ class PosixWritableFile final : public WritableFile {
     if (write_result < 0) {
       return PosixError("PosixWritableFile::WriteUnbuffered Failed", errno);
     }
-
+    
     return Status::OK();
   }
 
