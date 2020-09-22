@@ -181,12 +181,15 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     size_t file_size = zone_size_map[filename_];
 
     // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
+    // 512B 로 나누었을 때, 해당 값보다 1 더해 주어야 함.
     size_t sector_count = (file_size >> 9) + 1;
     if (sector_count < 1) {
       sector_count = 1;
     }
 
     char *tmp_buffer = nullptr;
+
+    // tmp_buffer 의 size 를 sector_count 의 512B 배수로 맞춰 줌.
     size_t tmp_buf_size = sector_count << 9;
     size_t ret = posix_memalign((void **) &tmp_buffer, sysconf(_SC_PAGESIZE), tmp_buf_size);
     if (ret != 0) {
@@ -195,6 +198,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
     // memset(tmp_buffer, 0, tmp_buf_size);
 
+    // 계산한 sector 갯수만큼 처음부터 읽어서 tmp_buffer 에 Read
     size_t read_size = zbc_pread(dev_, tmp_buffer, sector_count, target_zone_->zbz_start);
     if (read_size < 0) {
       return PosixError("PosixRandomAccessFile::Read Failed", errno);
@@ -344,6 +348,7 @@ class PosixWritableFile final : public WritableFile {
     if (size == 0) sector_count = 0;
     else {
       if (size >> 9 < 1) sector_count = 1;
+      // 512B 나눈 것 보다 1 많이 주어야 함.
       else sector_count = (size >> 9) + 1;
     }
 
