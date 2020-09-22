@@ -47,6 +47,7 @@ namespace {
 
 //Zone Mapping Table
 std::map<std::string, struct zbc_zone*> map_table;
+std::map<std::string, size_t> zone_size_map;
 
 // Set by EnvPosixTestHelper::SetReadOnlyMMapLimit() and MaxOpenFiles().
 int g_open_read_only_file_limit = -1;
@@ -117,9 +118,10 @@ class Limiter {
 class PosixSequentialFile final : public SequentialFile {
  public:
   // ZNS Device 와 target_zone 을 인수로 Class 생성
-  PosixSequentialFile(struct zbc_device *dev, struct zbc_zone *target_zone)
+  PosixSequentialFile(struct zbc_device *dev, struct zbc_zone *target_zone, std::string filename)
       : dev_(dev),
-        target_zone_(target_zone) {}
+        target_zone_(target_zone),
+        filename_(std::move(filename)) {}
 
   ~PosixSequentialFile() override {}
 
@@ -128,15 +130,20 @@ class PosixSequentialFile final : public SequentialFile {
     ssize_t sector_count = n >> 9;
     if (sector_count < 1) sector_count = 1;
 
+    size_t target_size = zone_size_map[filename_];
+
     // zbc_pread: 해당 zone 시작부터 sequential 하게 읽어와 scratch 에 넣어줌.
     size_t read_size = zbc_pread(dev_, scratch, sector_count, target_zone_->zbz_start);
     if (read_size < 0) {  // Read error. 
       return PosixError("PosixSequentialFile: zbc_pread failed.\n", errno);
     }
-
-    printf("Read: \"%s\" read_size %llu\n", scratch, strlen(scratch));
     
-    *result = Slice(scratch, strlen(scratch));
+    *result = Slice(scratch, target_size);
+
+    // CURRENT File 일 때, size mapping table 초기화
+    if (!strcmp(filename_.c_str(), "/tmp/leveldbtest-0/dbbench/CURRENT")) 
+      zone_size_map.erase(filename_);
+
     return Status::OK();
   }
 
@@ -147,6 +154,7 @@ class PosixSequentialFile final : public SequentialFile {
  private:
   struct zbc_zone *target_zone_;
   struct zbc_device *dev_;
+  std::string filename_;
 };
 
 // Implements random read access in a file using pread().
@@ -158,9 +166,10 @@ class PosixRandomAccessFile final : public RandomAccessFile {
  public:
   // The new instance takes ownership of |fd|. |fd_limiter| must outlive this
   // instance, and will be used to determine if .
-  PosixRandomAccessFile(struct zbc_device *dev, struct zbc_zone *target_zone)
+  PosixRandomAccessFile(struct zbc_device *dev, struct zbc_zone *target_zone, std::string filename)
       : dev_(dev),
-        target_zone_(target_zone) {}
+        target_zone_(target_zone),
+        filename_(std::move(filename)) {}
 
   ~PosixRandomAccessFile() override {}
 
@@ -169,30 +178,33 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     uint64_t sector_start;
     uint64_t sector_offset;
 
+    size_t file_size = zone_size_map[filename_];
+
     // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
     size_t sector_count = n >> 9;
     if (sector_count < 1) {
       sector_count = 1;
     }
 
-    // 읽기 시작할 sector 의 출발점을 target_zone 의 첫번째로 설정.
-    // offset 이 512B 보다 크다면, 데이터를 중간부터 읽는다는 의미.
-    // 512B 나눈만큼 섹터를 옮긴다.
-    sector_offset = (offset >> 9) >> 9;
-    sector_start = target_zone_->zbz_start;
+    void *tmp_buffer = nullptr;
+    size_t ret = posix_memalign((void **) &tmp_buffer, sysconf(_SC_PAGESIZE), file_size);
+    if (ret != 0) {
+      fprintf(stderr, "No memory for I/O buffer (%zu B)\n", file_size);
+      return PosixError("RandomAccessFile::Read Failed", errno);
+    }
+    memset(tmp_buffer, 0, file_size);
 
-    // if (sector_offset > 0) sector_start += sector_offset;
-
-    char* tmp_buf[28672];
-
-    ssize_t read_size = zbc_pread(dev_, tmp_buf, 56, sector_start);
+    // 쓰는게 없어서 읽는 것도 0...
+    // 뭘 어떻게 읽어도 답이 없다.
+    size_t read_size = zbc_pread(dev_, (char *) tmp_buffer, target_zone_->zbz_length, target_zone_->zbz_start);
     if (read_size < 0) {
       return PosixError("PosixRandomAccessFile::Read Failed", errno);
     }
 
-    printf("RandomAccessFile: \"%s\", %llu, %llu, %llu\n", 
-    tmp_buf, read_size, sector_start, sector_offset);
-    *result = Slice(scratch, read_size << 9);
+    /* Read Result Control here */
+    // 실패.....................
+    
+    *result = Slice(scratch, n);
 
     return Status::OK();
   }
@@ -200,6 +212,7 @@ class PosixRandomAccessFile final : public RandomAccessFile {
  private:
   struct zbc_zone *target_zone_;
   struct zbc_device *dev_;
+  std::string filename_;
 };
 
 // Implements random read access in a file using mmap().
@@ -324,8 +337,6 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status WriteUnbuffered(const char* data, size_t size) {
-    std::string tmp;
-
     uint64_t sector_start;
     size_t sector_count;
 
@@ -334,15 +345,14 @@ class PosixWritableFile final : public WritableFile {
       if (size >> 9 < 1) sector_count = 1;
       else sector_count = size >> 9;
     }
+
+    zone_size_map[filename_] += size;
     
     // 쓰기 시작할 sector_start 에 대해서 정해 줌.
     // 해당 target_zone 의 wp 부터 순차적으로 write
     sector_start = target_zone_->zbz_write_pointer;
 
-    tmp = data;
-    tmp.resize(size);
-
-    ssize_t write_result = zbc_pwrite(dev_, tmp.c_str(), sector_count, sector_start);
+    ssize_t write_result = zbc_pwrite(dev_, data, sector_count, sector_start);
     if (write_result < 0) {
       return PosixError("PosixWritableFile::WriteUnbuffered Failed", errno);
     }
@@ -544,7 +554,7 @@ class PosixEnv : public Env {
     printf("NewSequentialFile: \"%s\" in %llu\n", 
     filename.c_str(), target_zone->zbz_start);
 
-    *result = new PosixSequentialFile(dev, target_zone);
+    *result = new PosixSequentialFile(dev, target_zone, filename);
 
     return Status::OK();
   }
@@ -570,7 +580,7 @@ class PosixEnv : public Env {
     printf("NewRandomAccessFile: \"%s\" in %llu\n", 
     filename.c_str(), target_zone->zbz_start);
 
-    *result = new PosixRandomAccessFile(dev, target_zone);
+    *result = new PosixRandomAccessFile(dev, target_zone, filename);
 
     return Status::OK();
   }
@@ -750,25 +760,16 @@ class PosixEnv : public Env {
   }
 
   Status GetFileSize(const std::string& filename, uint64_t* size) override {
-    struct zbc_zone *target_zone = nullptr;
+    size_t file_size;
 
-    uint64_t zone_ofst;
-    uint64_t zone_start;
-
-    // filename 과 매핑 된 zone 의 현재 wp 받아오면
-    // file 이 들어있는 block 크기 받을 수 있음.
-    target_zone = leveldb::map_table[filename];
-    if (target_zone == nullptr) {
+    // filename 과 매핑된 사이즈
+    file_size = zone_size_map[filename];
+    if (file_size == 0) {
       *size = 0;
       return PosixError("GetFileSize: no target zone for " + filename, errno);
     } 
 
-    // 먼저, 해당 target_zone 의 현재 wp 와, start 구함.
-    // 그 후, size 를 wp - start 로, 512B 단위로 얼마나 쓰여졌는지 구함.
-    zone_ofst = target_zone->zbz_write_pointer;
-    zone_start = target_zone->zbz_start;
-    
-    *size = (zone_ofst - zone_start);
+    *size = file_size;
 
     return Status::OK();
   }
