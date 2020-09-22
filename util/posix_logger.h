@@ -32,9 +32,7 @@ class PosixLogger final : public Logger {
     : dev_(dev),
       target_zone_(target_zone) { assert(target_zone != nullptr); }
 
-  ~PosixLogger() override { 
-    zbc_close(dev_); 
-  }
+  ~PosixLogger() override {}
 
   void Logv(const char* format, std::va_list arguments) override {
     // Record the time as close to the Logv() call as possible.
