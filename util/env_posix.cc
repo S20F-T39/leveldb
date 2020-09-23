@@ -39,16 +39,19 @@
 
 #include <libzbc/zbc.h>
 
-#define MAX_ZBC_BUFFER_SIZE 8388608
+//Zone Mapping Table
+static std::map<std::string, struct zbc_zone*> map_table;
+static std::map<std::string, size_t> zone_size_map;
+static std::map<std::string, struct zbc_device*> path_dev_table;
 
 namespace leveldb {
 
 namespace {
 
 //Zone Mapping Table
-std::map<std::string, struct zbc_zone*> map_table;
-std::map<std::string, size_t> zone_size_map;
-std::map<std::string, struct zbc_device*> path_dev_table;
+// std::map<std::string, struct zbc_zone*> map_table;
+// std::map<std::string, size_t> zone_size_map;
+// std::map<std::string, struct zbc_device*> path_dev_table;
 
 // Set by EnvPosixTestHelper::SetReadOnlyMMapLimit() and MaxOpenFiles().
 int g_open_read_only_file_limit = -1;
@@ -350,22 +353,19 @@ class PosixWritableFile final : public WritableFile {
     if (size == 0) sector_count = 0;
     else {
       if (size % 512 == 0) sector_count = size >> 9;
-      else {
-        if ((size >> 9) < 1) sector_count = 1;
-        else sector_count = (size >> 9) + 1;
-      }
+      else sector_count = (size >> 9) + 1;
     }
 
     zone_size_map[filename_] += size;
     
-    // 쓰기 시작할 sector_start 에 대해서 정해 줌.
-    // 해당 target_zone 의 wp 부터 순차적으로 write
     sector_start = zbc_zone_wp(map_table[filename_]);
+    printf("before: \"%s\" wp: %llu\n", filename_.c_str(), zbc_zone_wp(map_table[filename_]));
     size_t write_result = zbc_pwrite(dev_, data, sector_count, sector_start);
     if (write_result < 0) {
       return PosixError("PosixWritableFile::WriteUnbuffered Failed", errno);
     }
-    printf("Write Result: %llu, wp: %llu\n", write_result, sector_start);
+    printf("after: write result: %llu \"%s\" wp: %llu\n", 
+    write_result, filename_.c_str(), zbc_zone_wp(map_table[filename_]));
     
     return Status::OK();
   }
@@ -623,7 +623,7 @@ class PosixEnv : public Env {
         return PosixError("NewWritableFile: FindZoneForFilename", errno);
       }
       // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
-      leveldb::map_table[current_file_name] = target_zone;
+      map_table[current_file_name] = target_zone;
       zbc_open_zone(dev, target_zone->zbz_start, 0);
     }
 
@@ -660,7 +660,7 @@ class PosixEnv : public Env {
     }
 
     // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
-    leveldb::map_table[current_file_name] = target_zone;
+    map_table[current_file_name] = target_zone;
     zbc_open_zone(dev, target_zone->zbz_start, 0);
 
     *result = new PosixWritableFile(dev, target_zone, current_file_name);
@@ -671,7 +671,7 @@ class PosixEnv : public Env {
   bool FileExists(const std::string& filename) override {
     // map 에서 key 로 가지고 있는 filename 이라면 true return
     // 그것이 아니라면 false
-    return leveldb::map_table.find(filename) != leveldb::map_table.end();
+    return map_table.find(filename) != map_table.end();
   }
 
   Status GetChildren(const std::string& directory_path,
