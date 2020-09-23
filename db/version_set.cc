@@ -909,15 +909,10 @@ Status VersionSet::Recover(bool* save_manifest) {
     std::string scratch;
     while (reader.ReadRecord(&record, &scratch) && s.ok()) {
       VersionEdit edit;
-	  fprintf(stderr, "reader read rocord result: ");
-	  fprintf(stderr, record.ToString().c_str());
-	  fprintf(stderr, "\n");
       s = edit.DecodeFrom(record);
       if (s.ok()) {
-			  fprintf(stderr,"decode ok\n");
         if (edit.has_comparator_ &&
             edit.comparator_ != icmp_.user_comparator()->Name()) {
-				fprintf(stderr,"Invalid Arg \n");
           s = Status::InvalidArgument(
               edit.comparator_ + " does not match existing comparator ",
               icmp_.user_comparator()->Name());
@@ -925,24 +920,20 @@ Status VersionSet::Recover(bool* save_manifest) {
       }
 
       if (s.ok()) {
-			  fprintf(stderr, "decode ok 2 \n");
         builder.Apply(&edit);
       }
 
       if (edit.has_log_number_) {
-			  fprintf(stderr, "log numer ok\n");
         log_number = edit.log_number_;
         have_log_number = true;
       }
 
       if (edit.has_prev_log_number_) {
-			  fprintf(stderr,"prev_log_num ok\n");
         prev_log_number = edit.prev_log_number_;
         have_prev_log_number = true;
       }
 
       if (edit.has_next_file_number_) {
-			  fprintf(stderr,"next_file_number ok\n");
         next_file = edit.next_file_number_;
         have_next_file = true;
       }
