@@ -42,8 +42,6 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     return Status::Corruption("file is too short to be an sstable");
   }
 
-  printf("File Size: %llu\n", size);
-
   char footer_space[Footer::kEncodedLength];
   Slice footer_input;
   Status s = file->Read(size - Footer::kEncodedLength, Footer::kEncodedLength,
@@ -55,7 +53,6 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
   // 문제가 발생되는 부분.
   s = footer.DecodeFrom(&footer_input);
   if (!s.ok()) {
-		fprintf(stderr, "Table open decode Error!\n");
 	  return s;
   }
 

@@ -204,7 +204,6 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
 
     // 계산한 sector 갯수만큼 처음부터 읽어서 tmp_buffer 에 Read
-    printf("Start Sector: %llu, with offset: %llu\n", target_zone_->zbz_start, offset);
     size_t read_size = zbc_pread(dev_, tmp_buffer, sector_count, target_zone_->zbz_start);
     if (read_size < 0) {
       return PosixError("PosixRandomAccessFile::Read Failed", errno);
@@ -215,8 +214,6 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     }
 
     *result = Slice(scratch, n);
-
-    printf("%s\n", result->ToString().c_str());
 
     return Status::OK();
   }
@@ -358,6 +355,13 @@ class PosixWritableFile final : public WritableFile {
     }
 
     zone_size_map[filename_] += size;
+
+    // 512B 단위로 size 나누어 떨어지지 않으면, buffer에 복사
+    // if (zone_size_map[filename_] % 512 != 0) {
+    //   std::memcpy(buf_ + pos_, data, size);
+    //   pos_ += size;
+    //   printf("buf_ %s\n", buf_);
+    // }
     
     sector_start = zbc_zone_wp(map_table[filename_]);
     size_t write_result = zbc_pwrite(dev_, data, sector_count, sector_start);
@@ -696,8 +700,6 @@ class PosixEnv : public Env {
     free(map_table[filename]);
     map_table.erase(filename);
     zone_size_map.erase(filename);
-
-    printf("RemoveFile \"%s\"\n", filename.c_str());
 
     return Status::OK();
   }

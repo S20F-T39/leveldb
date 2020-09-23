@@ -518,10 +518,6 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     s = BuildTable(dbname_, env_, options_, table_cache_, iter, &meta);
     mutex_.Lock();
   }
-  if(!s.ok()){
-		fprintf(stderr,"Build Table Error!\n");	  
-	}
-
   Log(options_.info_log, "Level-0 table #%llu: %lld bytes %s",
       (unsigned long long)meta.number, (unsigned long long)meta.file_size,
       s.ToString().c_str());
@@ -569,13 +565,9 @@ void DBImpl::CompactMemTable() {
 
   // Replace immutable memtable with the generated Table
   if (s.ok()) {
-	fprintf(stderr, "compating.. not IO error\n");
     edit.SetPrevLogNumber(0);
     edit.SetLogNumber(logfile_number_);  // Earlier logs no longer needed
     s = versions_->LogAndApply(&edit, &mutex_);
-  }
-  else {
-	fprintf(stderr, "compacting,, IO error\n");
   }
 
   if (s.ok()) {
@@ -585,7 +577,6 @@ void DBImpl::CompactMemTable() {
     has_imm_.store(false, std::memory_order_release);
     RemoveObsoleteFiles();
   } else {
-	fprintf(stderr, "CompactMemTable Error!\n");
     RecordBackgroundError(s);
   }
 }

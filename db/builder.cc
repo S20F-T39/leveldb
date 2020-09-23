@@ -76,9 +76,6 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
       delete it;
     }
   }
-  if(!s.ok()){
-	fprintf(stderr,"iterator status is not ok!\n");
-  }
 
   // Check for input iterator errors
   if (!iter->status().ok()) {
@@ -88,7 +85,6 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
   if (s.ok() && meta->file_size > 0) {
     // Keep it
   } else {
-	fprintf(stderr,"iterator status not ok!\n");
     env->RemoveFile(fname);
   }
   return s;

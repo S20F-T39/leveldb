@@ -59,9 +59,6 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
     if (s.ok()) {
       s = Table::Open(options_, file, file_size, &table);
     }
-	if(!s.ok()){
-		fprintf(stderr,"Table Open Error!\n");
-	}
 
     if (!s.ok()) {
       assert(table == nullptr);
@@ -88,7 +85,6 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
   Cache::Handle* handle = nullptr;
   Status s = FindTable(file_number, file_size, &handle);
   if (!s.ok()) {
-	fprintf(stderr,"NewIterator FindTable Error!\n");
     return NewErrorIterator(s);
   }
 
