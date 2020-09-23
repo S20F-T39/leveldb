@@ -46,10 +46,13 @@ Status Footer::DecodeFrom(Slice* input) {
   const uint32_t magic_hi = DecodeFixed32(magic_ptr + 4);
   const uint64_t magic = ((static_cast<uint64_t>(magic_hi) << 32) |
                           (static_cast<uint64_t>(magic_lo)));
+
+  printf("Input data: %s\n", magic_ptr);
+  printf("magic_lo: %lu\n", magic_lo);
+  printf("magic_hi: %lu\n", magic_hi);
+  printf("magic: %llu\n", magic);
   if (magic != kTableMagicNumber) {
-	fprintf(stderr,"not an sstable\n");
     return Status::Corruption("not an sstable (bad magic number)");
-	//return Status::OK();
   }
 
   Status result = metaindex_handle_.DecodeFrom(input);

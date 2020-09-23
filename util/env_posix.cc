@@ -39,16 +39,19 @@
 
 #include <libzbc/zbc.h>
 
-#define MAX_ZBC_BUFFER_SIZE 8388608
+//Zone Mapping Table
+static std::map<std::string, struct zbc_zone*> map_table;
+static std::map<std::string, size_t> zone_size_map;
+static std::map<std::string, struct zbc_device*> path_dev_table;
 
 namespace leveldb {
 
 namespace {
 
 //Zone Mapping Table
-std::map<std::string, struct zbc_zone*> map_table;
-std::map<std::string, size_t> zone_size_map;
-std::map<std::string, struct zbc_device*> path_dev_table;
+// std::map<std::string, struct zbc_zone*> map_table;
+// std::map<std::string, size_t> zone_size_map;
+// std::map<std::string, struct zbc_device*> path_dev_table;
 
 // Set by EnvPosixTestHelper::SetReadOnlyMMapLimit() and MaxOpenFiles().
 int g_open_read_only_file_limit = -1;
@@ -127,9 +130,12 @@ class PosixSequentialFile final : public SequentialFile {
   ~PosixSequentialFile() override {}
 
   Status Read(size_t n, Slice* result, char* scratch) override {
-    // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
-    ssize_t sector_count = n >> 9;
-    if (sector_count < 1) sector_count = 1;
+    size_t sector_count = 0;
+
+    sector_count = n >> 9;
+    if (sector_count == 0 || n % 512 != 0) {
+      sector_count += 1;
+    }
 
     size_t target_size = zone_size_map[filename_];
 
@@ -179,13 +185,12 @@ class PosixRandomAccessFile final : public RandomAccessFile {
     uint64_t sector_start;
     uint64_t sector_offset;
 
+    size_t sector_count = 0;
     size_t file_size = zone_size_map[filename_];
 
-    // sector_count 지정. 512B 보다 작을 때, 1로 주어 Read 보장.
-    // 512B 로 나누었을 때, 해당 값보다 1 더해 주어야 함.
-    size_t sector_count = (file_size >> 9) + 1;
-    if (sector_count < 1) {
-      sector_count = 1;
+    sector_count = file_size >> 9;
+    if (sector_count == 0 || file_size % 512 != 0) {
+      sector_count += 1;
     }
 
     char *tmp_buffer = nullptr;
@@ -197,21 +202,21 @@ class PosixRandomAccessFile final : public RandomAccessFile {
       fprintf(stderr, "No memory for I/O buffer (%zu B)\n", tmp_buf_size);
       return PosixError("RandomAccessFile::Read Failed", errno);
     }
-    // memset(tmp_buffer, 0, tmp_buf_size);
 
     // 계산한 sector 갯수만큼 처음부터 읽어서 tmp_buffer 에 Read
-    printf("Start Sector: %llu\n", target_zone_->zbz_start);
+    printf("Start Sector: %llu, with offset: %llu\n", target_zone_->zbz_start, offset);
     size_t read_size = zbc_pread(dev_, tmp_buffer, sector_count, target_zone_->zbz_start);
     if (read_size < 0) {
       return PosixError("PosixRandomAccessFile::Read Failed", errno);
     }
 
-    // for (uint64_t i = offset; i < file_size; i++) {
-    //   printf("%x", tmp_buffer[i]);
-    // }
-    // printf("\n");
+    for (size_t i = 0; i < n; i++) {
+      scratch[i] = tmp_buffer[offset++];
+    }
 
-    *result = Slice(scratch, 1);
+    *result = Slice(scratch, n);
+
+    printf("%s\n", result->ToString().c_str());
 
     return Status::OK();
   }
@@ -344,29 +349,23 @@ class PosixWritableFile final : public WritableFile {
   }
 
   Status WriteUnbuffered(const char* data, size_t size) {
-    uint64_t sector_start;
-    size_t sector_count;
+    uint64_t sector_start = 0;
+    size_t sector_count = 0;
 
-    if (size == 0) sector_count = 0;
-    else {
-      if (size % 512 == 0) sector_count = size >> 9;
-      else {
-        if ((size >> 9) < 1) sector_count = 1;
-        else sector_count = (size >> 9) + 1;
-      }
+    sector_count = size >> 9;
+    if (sector_count == 0 || size % 512 != 0) {
+      sector_count += 1;
     }
 
     zone_size_map[filename_] += size;
     
-    // 쓰기 시작할 sector_start 에 대해서 정해 줌.
-    // 해당 target_zone 의 wp 부터 순차적으로 write
     sector_start = zbc_zone_wp(map_table[filename_]);
     size_t write_result = zbc_pwrite(dev_, data, sector_count, sector_start);
     if (write_result < 0) {
       return PosixError("PosixWritableFile::WriteUnbuffered Failed", errno);
     }
-    printf("Write Result: %llu, wp: %llu\n", write_result, sector_start);
-    
+    map_table[filename_]->zbz_write_pointer += write_result;
+
     return Status::OK();
   }
 
@@ -623,7 +622,7 @@ class PosixEnv : public Env {
         return PosixError("NewWritableFile: FindZoneForFilename", errno);
       }
       // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
-      leveldb::map_table[current_file_name] = target_zone;
+      map_table[current_file_name] = target_zone;
       zbc_open_zone(dev, target_zone->zbz_start, 0);
     }
 
@@ -660,7 +659,7 @@ class PosixEnv : public Env {
     }
 
     // target_zone 함수 통해서 받아 왔을 때, filename 과 매핑.
-    leveldb::map_table[current_file_name] = target_zone;
+    map_table[current_file_name] = target_zone;
     zbc_open_zone(dev, target_zone->zbz_start, 0);
 
     *result = new PosixWritableFile(dev, target_zone, current_file_name);
@@ -671,7 +670,7 @@ class PosixEnv : public Env {
   bool FileExists(const std::string& filename) override {
     // map 에서 key 로 가지고 있는 filename 이라면 true return
     // 그것이 아니라면 false
-    return leveldb::map_table.find(filename) != leveldb::map_table.end();
+    return map_table.find(filename) != map_table.end();
   }
 
   Status GetChildren(const std::string& directory_path,
@@ -696,6 +695,7 @@ class PosixEnv : public Env {
     // zone reset 후, mapping_table 에서도 지워줘야 함.
     free(map_table[filename]);
     map_table.erase(filename);
+    zone_size_map.erase(filename);
 
     printf("RemoveFile \"%s\"\n", filename.c_str());
 
@@ -741,6 +741,7 @@ class PosixEnv : public Env {
     // zone reset 후, mapping_table 에서도 지워줘야 함.
     free(map_table[dirname]);
     map_table.erase(dirname);
+    zone_size_map.erase(dirname);
 
     return Status::OK();
   }
